@@ -139,6 +139,86 @@ def test_index_works_without_embeddings(repo):
     assert index.retriever.retrieve("divide", k=3)
 
 
+def _bm25_index(repo) -> CodeIndex:
+    settings = Settings(repo_path=repo, embedding_backend="none", index_dir=repo / ".idx")
+    return CodeIndex(settings, Workspace(root=repo))
+
+
+def _retrieved_text(index: CodeIndex, query: str) -> str:
+    return "\n".join(chunk.content for chunk in index.retriever.retrieve(query, k=5))
+
+
+def test_reindex_reflects_an_edit_made_during_a_run(repo):
+    # The agent edits files while it works, so an index frozen at startup would
+    # feed the next review comment the code it just replaced.
+    index = _bm25_index(repo)
+    index.refresh()
+    assert "a / b" in _retrieved_text(index, "divide")
+
+    (repo / "src" / "calc.py").write_text(
+        'def divide(a, b):\n    raise NotImplementedError("gone")\n', encoding="utf-8"
+    )
+    index.reindex(["src/calc.py"])
+
+    text = _retrieved_text(index, "divide")
+    assert "NotImplementedError" in text
+    assert "a / b" not in text
+
+
+def test_reindex_drops_a_file_that_was_deleted(repo):
+    index = _bm25_index(repo)
+    index.refresh()
+
+    (repo / "src" / "calc.py").unlink()
+    index.reindex(["src/calc.py"])
+
+    assert not index.retriever.retrieve("divide", k=5)
+    assert all(doc.metadata["path"] != "src/calc.py" for doc in index.documents)
+
+
+def test_reindex_picks_up_a_newly_created_file(repo):
+    index = _bm25_index(repo)
+    index.refresh()
+
+    (repo / "src" / "validators.py").write_text(
+        "def check_address_format(value):\n    return '@' in value\n", encoding="utf-8"
+    )
+    index.reindex(["src/validators.py"])
+
+    assert "check_address_format" in _retrieved_text(index, "check_address_format")
+
+
+def test_reindex_leaves_untouched_files_alone(repo):
+    index = _bm25_index(repo)
+    index.refresh()
+    before = len(index.documents)
+
+    index.reindex(["src/calc.py"])
+
+    assert len(index.documents) == before
+    assert "# demo" in _retrieved_text(index, "demo")
+
+
+def test_reindex_only_embeds_the_touched_file(indexed, repo):
+    index, store, _ = indexed
+    index.refresh()
+    (repo / "src" / "calc.py").write_text("def divide(a, b):\n    return 0\n", encoding="utf-8")
+
+    index.reindex(["src/calc.py"])
+
+    assert _embedded_paths(store) == {"src/calc.py"}
+    assert any(doc_id.startswith("src/calc.py") for doc_id in store.deleted)
+
+
+def test_reindex_without_a_prior_refresh_scans_everything(repo):
+    index = _bm25_index(repo)
+
+    stats = index.reindex(["src/calc.py"])
+
+    assert stats.files == 2  # a full scan ran, not just the one path
+    assert "# demo" in _retrieved_text(index, "demo")
+
+
 def test_missing_embedding_dependency_degrades_to_bm25(repo, monkeypatch):
     from pr_agent.rag.embeddings import EmbeddingsUnavailable
 
