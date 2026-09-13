@@ -106,6 +106,13 @@ Reviewers write in two registers, so the index serves both:
 The two result lists are fused with **reciprocal rank fusion**, so a chunk
 found by both ranks above one found by either.
 
+**BM25 alone is the default.** Splitting compound identifiers recovers most of
+the vocabulary overlap embeddings are usually brought in to fix, and whatever
+retrieval misses the model can still reach with `search_repository` and
+`read_file` during the implement step. Set `--embeddings local` or
+`--embeddings voyage` to add the dense half, at the cost of a model download or
+an API key plus a vector store to keep in sync.
+
 Other details that matter in practice:
 
 - **Language-aware chunking.** Files split on function and class boundaries
@@ -116,12 +123,11 @@ Other details that matter in practice:
   embedding is not, so only files whose content hash changed are re-embedded.
   Changing the embedding model or chunk size invalidates the store and forces a
   clean rebuild.
+- **The index follows the agent's own edits.** Each implemented comment
+  re-chunks the files it changed, so a later comment is never planned against
+  code that has already been replaced.
 - **The excerpt is never trusted for editing.** The model is told to
   `read_file` before it edits, because a retrieved chunk can be stale.
-
-Embeddings are optional. With `--embeddings none` the agent runs on BM25 alone
-— no model download, no extra API key, and still useful, since review comments
-usually name the identifier they are about.
 
 ---
 
@@ -197,7 +203,7 @@ git fetch origin pull/123/head:pr-123 && git checkout pr-123
 | `--validate` | none | A check to run after each change. Repeatable. |
 | `--auto-validate` | off | Detect checks from the repo (ruff, pytest, npm, go). |
 | `--max-fix-attempts` | 3 | Retries after a failing check before rolling back. |
-| `--embeddings` | `local` | `local`, `voyage` or `none`. |
+| `--embeddings` | `none` | `local`, `voyage` or `none`. |
 | `--comment-id` | all | Only handle these comment ids. Repeatable. |
 | `--ignore-author` | none | Skip a login's comments. Repeatable. |
 | `--self-login` | none | The agent's own login, so it skips threads it already answered. |
@@ -240,7 +246,7 @@ Notable ones:
 | --- | --- | --- |
 | `PR_AGENT_MODEL` | `claude-opus-5` | Any current Claude model id. |
 | `PR_AGENT_THINKING` | `true` | Adaptive thinking. |
-| `PR_AGENT_EMBEDDINGS` | `local` | `local`, `voyage`, `none`. |
+| `PR_AGENT_EMBEDDINGS` | `none` | `local`, `voyage`, `none`. |
 | `PR_AGENT_VALIDATE` | empty | `';;'`-separated commands. |
 | `PR_AGENT_RETRIEVAL_K` | `8` | Chunks fed to the planner. |
 | `GITHUB_API_URL` | github.com | Point at GitHub Enterprise here. |
@@ -296,9 +302,9 @@ src/pr_agent/
 
 - **Forked PRs.** `--push` pushes to the head branch of your local checkout; if
   the PR comes from a fork you need push rights on that fork.
-- **Large repositories.** The first index with local embeddings can take a
-  while. Use `--embeddings none` to skip it, or keep `.pr_agent/index` around
-  between runs — only changed files are re-embedded.
+- **Large repositories.** BM25-only indexing is fast, but if you turn
+  embeddings on, the first index can take a while. Keep `.pr_agent/index`
+  around between runs — only changed files are re-embedded.
 - **Outdated comments.** A comment anchored to a line that has since moved is
   still attempted; the agent works from the diff hunk and retrieval, which
   usually recovers, but not always.

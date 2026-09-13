@@ -424,7 +424,11 @@ def make_record(deps: AgentDeps):
         # Capture the diff before either branch clears the snapshots.
         diff = deps.workspace.pending_diff() if keep else ""
         if keep:
-            deps.workspace.commit_changes()
+            committed = deps.workspace.commit_changes()
+            # Without this the next thread retrieves the superseded version of
+            # what we just wrote. A rollback needs none: restoring the snapshot
+            # puts back exactly the content the index already holds.
+            deps.index.reindex(committed)
         else:
             rolled_back = deps.workspace.rollback()
             if rolled_back:

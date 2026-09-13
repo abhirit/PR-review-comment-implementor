@@ -47,7 +47,10 @@ class Settings(BaseSettings):
     repo_path: Path = Field(default=Path("."), alias="PR_AGENT_REPO_PATH")
 
     # --- retrieval -------------------------------------------------------
-    embedding_backend: EmbeddingBackend = Field(default="local", alias="PR_AGENT_EMBEDDINGS")
+    # BM25 over code-aware tokens already matches the identifiers reviewers
+    # quote, and the model can grep for the rest, so embeddings are opt-in
+    # rather than a required model download on first run.
+    embedding_backend: EmbeddingBackend = Field(default="none", alias="PR_AGENT_EMBEDDINGS")
     embedding_model: str = Field(
         default="sentence-transformers/all-MiniLM-L6-v2",
         alias="PR_AGENT_EMBEDDING_MODEL",
