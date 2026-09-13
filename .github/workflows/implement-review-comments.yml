@@ -1,0 +1,76 @@
+# Run the agent against a pull request from the Actions tab.
+#
+# Deliberately manual-dispatch only: every run costs Claude API credits and
+# pushes commits, so it should be started by a person, not by a comment webhook.
+name: Implement review comments
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to work on
+        required: true
+        type: string
+      validate:
+        description: "Checks to run after each change (';;' separated)"
+        required: false
+        default: "ruff check .;;python -m pytest -q"
+        type: string
+      push:
+        description: Push the resulting commit to the PR branch
+        required: false
+        default: false
+        type: boolean
+      reply:
+        description: Post a reply on each review thread that was handled
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request branch
+        uses: actions/checkout@v4
+        with:
+          # A full history keeps the later commit and push straightforward.
+          fetch-depth: 0
+
+      - name: Switch to the PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          git fetch origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}"
+          git checkout "pr-${PR_NUMBER}"
+          git config user.name "pr-review-agent"
+          git config user.email "pr-review-agent@users.noreply.github.com"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the agent
+        run: pip install -e .
+
+      - name: Implement the review comments
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # BM25-only retrieval keeps CI fast: no model download, no extra key.
+          PR_AGENT_EMBEDDINGS: none
+          PR_AGENT_VALIDATE: ${{ inputs.validate }}
+        run: |
+          pr-agent run "${GITHUB_REPOSITORY}#${{ inputs.pr_number }}" \
+            --repo . \
+            ${{ inputs.push && '--push' || '' }} \
+            ${{ inputs.reply && '--reply' || '' }}
+
+      - name: Show the resulting diff
+        if: always()
+        run: git --no-pager diff HEAD~1 --stat || git --no-pager status --short

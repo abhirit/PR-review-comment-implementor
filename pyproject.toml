@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-review-implementor"
+version = "0.1.0"
+description = "A LangGraph agent that reads GitHub PR review comments and implements the requested code changes, grounded by RAG over the repository."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "langgraph>=0.2.60",
+    "langchain-core>=0.3.30",
+    "langchain-anthropic>=0.3.5",
+    "langchain-text-splitters>=0.3.5",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+# Vector store + local embeddings. Kept optional so the agent can run in
+# BM25-only retrieval mode with no model downloads.
+vector = [
+    "langchain-chroma>=0.2.0",
+    "chromadb>=0.5.5",
+]
+local-embeddings = [
+    "langchain-huggingface>=0.1.2",
+    "sentence-transformers>=3.0",
+]
+voyage = [
+    "langchain-voyageai>=0.1.4",
+]
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+pr-agent = "pr_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pr_agent = ["web/static/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer.Option(...) in a default is the framework's documented idiom.
+"src/pr_agent/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

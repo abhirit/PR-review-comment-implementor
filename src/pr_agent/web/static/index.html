@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR Review Comment Implementor</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#129302;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>PR Review Comment Implementor</h1>
+      <p class="brand-sub">Reads review comments, implements the changes, verifies them.</p>
+    </div>
+  </div>
+  <div class="status-pills" id="status-pills"></div>
+</header>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------------- -->
+  <aside class="sidebar" aria-label="Run configuration">
+    <form id="run-form" autocomplete="off">
+
+      <section class="panel">
+        <h2>Target</h2>
+        <label for="pr">Pull request</label>
+        <input id="pr" name="pr" type="text" placeholder="owner/repo#123 or PR URL" required>
+
+        <label for="repo_path">Local checkout</label>
+        <input id="repo_path" name="repo_path" type="text" value="." required>
+        <p class="hint" id="repo-hint">Check out the PR branch here before running.</p>
+
+        <button type="button" class="btn btn-secondary full" id="load-threads">
+          Load review threads
+        </button>
+      </section>
+
+      <section class="panel">
+        <h2>Mode</h2>
+        <div class="choice-group" role="radiogroup" aria-label="Run mode">
+          <label class="choice">
+            <input type="radio" name="mode" value="dry" checked>
+            <span class="choice-body">
+              <strong>Dry run</strong>
+              <em>Shows the plan, the diff and the replies. Changes nothing.</em>
+            </span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="mode" value="local">
+            <span class="choice-body">
+              <strong>Implement locally</strong>
+              <em>Edits and commits in your checkout. Nothing is pushed.</em>
+            </span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="mode" value="full">
+            <span class="choice-body">
+              <strong>Implement and publish</strong>
+              <em>Also pushes the commit and replies on GitHub.</em>
+            </span>
+          </label>
+        </div>
+
+        <div class="sub-options" id="publish-options" hidden>
+          <label class="check"><input type="checkbox" id="push" checked> Push to the PR branch</label>
+          <label class="check"><input type="checkbox" id="reply" checked> Reply on each thread</label>
+          <label class="check"><input type="checkbox" id="resolve"> Resolve implemented threads</label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Verification</h2>
+        <label for="validate">Checks to run after each change</label>
+        <textarea id="validate" rows="3" placeholder="ruff check .&#10;pytest -q"></textarea>
+        <p class="hint">One command per line. Without these, nothing is verified.</p>
+        <button type="button" class="btn btn-ghost full" id="detect-checks">
+          Detect from repository
+        </button>
+
+        <label for="max_fix_attempts">Retries after a failed check</label>
+        <input id="max_fix_attempts" type="number" min="0" max="10" value="3">
+      </section>
+
+      <section class="panel">
+        <details>
+          <summary>Advanced</summary>
+          <label for="model">Model</label>
+          <input id="model" type="text" placeholder="claude-opus-5">
+
+          <label for="embeddings">Retrieval</label>
+          <select id="embeddings">
+            <option value="">Use configured default</option>
+            <option value="local">Local embeddings + BM25</option>
+            <option value="voyage">Voyage embeddings + BM25</option>
+            <option value="none">BM25 keyword only (fastest)</option>
+          </select>
+
+          <label for="ignore_authors">Ignore comments by</label>
+          <input id="ignore_authors" type="text" placeholder="dependabot, lint-bot">
+
+          <label for="self_login">Agent's own GitHub login</label>
+          <input id="self_login" type="text" placeholder="my-bot">
+          <p class="hint">Threads it already replied to are skipped.</p>
+
+          <label class="check"><input type="checkbox" id="include_review_bodies"> Include review summary text</label>
+        </details>
+      </section>
+
+      <div class="actions">
+        <button type="submit" class="btn btn-primary full" id="start-run">Start run</button>
+        <button type="button" class="btn btn-danger full" id="cancel-run" hidden>Cancel run</button>
+      </div>
+    </form>
+  </aside>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="content">
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" role="tab" data-tab="threads">Review threads</button>
+      <button class="tab" role="tab" data-tab="run">Run<span class="tab-badge" id="run-badge" hidden></span></button>
+      <button class="tab" role="tab" data-tab="search">Retrieval</button>
+      <button class="tab" role="tab" data-tab="history">History</button>
+    </nav>
+
+    <!-- threads ------------------------------------------------------- -->
+    <div class="tabpanel is-active" data-panel="threads">
+      <div class="panel-head">
+        <h2>Review threads</h2>
+        <div class="panel-head-actions" id="thread-actions" hidden>
+          <span class="muted" id="thread-count"></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="select-all">Select all</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="select-none">Clear</button>
+        </div>
+      </div>
+      <div id="threads-list">
+        <p class="empty">Enter a pull request and load its review threads to begin.</p>
+      </div>
+    </div>
+
+    <!-- run ----------------------------------------------------------- -->
+    <div class="tabpanel" data-panel="run">
+      <div id="run-empty" class="empty">No run yet. Configure one on the left and press Start run.</div>
+
+      <div id="run-view" hidden>
+        <div class="run-header">
+          <div>
+            <h2 id="run-title">Run</h2>
+            <p class="muted" id="run-meta"></p>
+          </div>
+          <span class="badge" id="run-status">starting</span>
+        </div>
+
+        <ol class="pipeline" id="pipeline" aria-label="Pipeline stages"></ol>
+
+        <div id="run-banner"></div>
+
+        <div id="outcomes"></div>
+
+        <details class="log-drawer" id="log-drawer">
+          <summary>Activity log <span class="muted" id="log-count"></span></summary>
+          <pre class="log" id="log"></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- search -------------------------------------------------------- -->
+    <div class="tabpanel" data-panel="search">
+      <div class="panel-head"><h2>Retrieval</h2></div>
+      <p class="muted spaced">
+        Query the same index the agent uses. Useful for checking whether a comment's
+        subject is actually findable before you run.
+      </p>
+      <form id="search-form" class="search-row">
+        <input id="search-q" type="text" placeholder="e.g. where are review threads grouped" required>
+        <button type="submit" class="btn btn-secondary">Search</button>
+      </form>
+      <div id="search-results"></div>
+    </div>
+
+    <!-- history ------------------------------------------------------- -->
+    <div class="tabpanel" data-panel="history">
+      <div class="panel-head">
+        <h2>Previous runs</h2>
+        <button type="button" class="btn btn-ghost btn-sm" id="refresh-history">Refresh</button>
+      </div>
+      <div id="history-list"><p class="empty">No runs in this session yet.</p></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
