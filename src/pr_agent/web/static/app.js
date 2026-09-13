@@ -86,8 +86,10 @@ async function loadConfig() {
     if (title) pill.title = title;
     pills.appendChild(pill);
   };
-  add(config.anthropic_key_set ? "Claude key" : "No Claude key", config.anthropic_key_set,
-      config.anthropic_key_set ? "ANTHROPIC_API_KEY is set" : "Set ANTHROPIC_API_KEY and restart");
+  const keyName = config.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "GOOGLE_API_KEY";
+  const keyLabel = config.provider === "anthropic" ? "Claude key" : "Gemini key";
+  add(config.llm_key_set ? keyLabel : `No ${keyLabel}`, config.llm_key_set,
+      config.llm_key_set ? `${keyName} is set` : `Set ${keyName} and restart`);
   add(config.github_token_set ? "GitHub token" : "No GitHub token", config.github_token_set,
       config.github_token_set ? "GITHUB_TOKEN is set" : "Set GITHUB_TOKEN and restart");
 

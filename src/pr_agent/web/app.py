@@ -63,9 +63,10 @@ def create_app() -> FastAPI:
             detected = detect_validation_commands(resolved)
 
         return ConfigStatus(
-            anthropic_key_set=bool(settings.anthropic_api_key),
+            llm_key_set=bool(settings.llm_api_key),
             github_token_set=bool(settings.github_token),
             voyage_key_set=bool(settings.voyage_api_key),
+            provider=settings.provider,
             model=settings.model,
             embedding_backend=settings.embedding_backend,
             repo_path=str(resolved.resolve()) if resolved.exists() else str(resolved),

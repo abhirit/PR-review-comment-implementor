@@ -1,8 +1,9 @@
 """Embedding backends.
 
-Anthropic does not serve an embeddings endpoint, so the embedding model is
-chosen independently of the chat model. Two backends are supported plus an
-explicit opt-out that leaves retrieval to BM25 alone.
+The embedding model is chosen independently of the chat model: Anthropic
+serves no embeddings endpoint at all, and Gemini's is a separate model, so
+neither provider decides this. Three backends are supported plus an explicit
+opt-out that leaves retrieval to BM25 alone.
 """
 
 from __future__ import annotations
@@ -32,6 +33,21 @@ def build_embeddings(settings: Settings) -> Embeddings | None:
         log.info("Embeddings disabled; retrieval will use BM25 only.")
         return None
 
+    if backend in {"google", "gemini"}:
+        try:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        except ImportError as exc:
+            raise EmbeddingsUnavailable(
+                "The 'google' embedding backend needs langchain-google-genai: "
+                "pip install 'pr-review-implementor'"
+            ) from exc
+        if not settings.google_api_key:
+            raise EmbeddingsUnavailable("GOOGLE_API_KEY is not set.")
+        return GoogleGenerativeAIEmbeddings(
+            model=settings.google_embedding_model,
+            google_api_key=settings.google_api_key,
+        )
+
     if backend == "voyage":
         try:
             from langchain_voyageai import VoyageAIEmbeddings
@@ -59,5 +75,6 @@ def build_embeddings(settings: Settings) -> Embeddings | None:
         return HuggingFaceEmbeddings(model_name=settings.embedding_model)
 
     raise EmbeddingsUnavailable(
-        f"Unknown embedding backend '{backend}'. Use 'local', 'voyage' or 'none'."
+        f"Unknown embedding backend '{backend}'. "
+        "Use 'google', 'local', 'voyage' or 'none'."
     )

@@ -13,7 +13,7 @@ license = { text = "MIT" }
 dependencies = [
     "langgraph>=0.2.60",
     "langchain-core>=0.3.30",
-    "langchain-anthropic>=0.3.5",
+    "langchain-google-genai>=2.1",
     "langchain-text-splitters>=0.3.5",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -23,6 +23,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Claude instead of Gemini: set PR_AGENT_PROVIDER=anthropic once installed.
+anthropic = [
+    "langchain-anthropic>=0.3.5",
+]
 # Vector store + local embeddings. Kept optional so the agent can run in
 # BM25-only retrieval mode with no model downloads.
 vector = [
@@ -41,6 +45,8 @@ web = [
     "uvicorn[standard]>=0.29",
 ]
 dev = [
+    # The Claude provider is exercised by the test suite either way.
+    "langchain-anthropic>=0.3.5",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.6",

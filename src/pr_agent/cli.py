@@ -72,9 +72,12 @@ def run(
         "--self-login",
         help="The agent's own GitHub login, so threads it already answered are skipped.",
     ),
-    model: str = typer.Option(None, "--model", help="Override the Claude model id."),
+    provider: str = typer.Option(
+        None, "--provider", help="Chat provider: google (Gemini) or anthropic (Claude)."
+    ),
+    model: str = typer.Option(None, "--model", help="Override the model id."),
     embeddings: str = typer.Option(
-        None, "--embeddings", help="Embedding backend: local, voyage or none."
+        None, "--embeddings", help="Embedding backend: google, local, voyage or none."
     ),
     validate: list[str] = typer.Option(
         None, "--validate", help="Validation command to run after each change. Repeatable."
@@ -98,6 +101,7 @@ def run(
 
     settings = load_settings(
         repo_path=repo_path,
+        provider=provider,
         model=model,
         embedding_backend=embeddings,
         max_fix_attempts=max_fix_attempts,
@@ -167,7 +171,9 @@ def run(
 @app.command()
 def index(
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Repository to index."),
-    embeddings: str = typer.Option(None, "--embeddings", help="local, voyage or none."),
+    embeddings: str = typer.Option(
+        None, "--embeddings", help="google, local, voyage or none."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Build or refresh the retrieval index without running the agent."""
@@ -183,7 +189,9 @@ def search(
     query: str = typer.Argument(..., help="What to look for."),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r"),
     k: int = typer.Option(5, "--k", help="How many chunks to return."),
-    embeddings: str = typer.Option(None, "--embeddings", help="local, voyage or none."),
+    embeddings: str = typer.Option(
+        None, "--embeddings", help="google, local, voyage or none."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Query the index directly — useful for checking retrieval quality."""

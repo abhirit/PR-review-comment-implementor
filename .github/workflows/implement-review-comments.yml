@@ -1,6 +1,6 @@
 # Run the agent against a pull request from the Actions tab.
 #
-# Deliberately manual-dispatch only: every run costs Claude API credits and
+# Deliberately manual-dispatch only: every run costs Gemini API credits and
 # pushes commits, so it should be started by a person, not by a comment webhook.
 name: Implement review comments
 
@@ -60,7 +60,7 @@ jobs:
 
       - name: Implement the review comments
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # BM25-only retrieval keeps CI fast: no model download, no extra key.
           PR_AGENT_EMBEDDINGS: none

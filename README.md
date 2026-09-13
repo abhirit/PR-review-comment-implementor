@@ -6,8 +6,8 @@ grounded by retrieval over the repository, verified by your own test suite, and
 rolled back when it cannot get a change to pass.
 
 Built with **LangGraph** (the control flow), **LangChain** (model, tools and
-text splitting), **Claude** (`claude-opus-5` by default) and a **hybrid RAG**
-index over the repo.
+text splitting), **Gemini** (`gemini-3.8-flash` by default, with Claude as an
+alternative provider) and a **hybrid RAG** index over the repo.
 
 ```
 pr-agent serve                                    # web UI on localhost:8765
@@ -109,9 +109,10 @@ found by both ranks above one found by either.
 **BM25 alone is the default.** Splitting compound identifiers recovers most of
 the vocabulary overlap embeddings are usually brought in to fix, and whatever
 retrieval misses the model can still reach with `search_repository` and
-`read_file` during the implement step. Set `--embeddings local` or
-`--embeddings voyage` to add the dense half, at the cost of a model download or
-an API key plus a vector store to keep in sync.
+`read_file` during the implement step. Set `--embeddings google`,
+`--embeddings local` or `--embeddings voyage` to add the dense half, at the
+cost of a model download or extra API calls plus a vector store to keep in
+sync.
 
 Other details that matter in practice:
 
@@ -146,15 +147,23 @@ pip install -e ".[vector,local-embeddings]"
 # optional: Voyage AI embeddings instead (strong on code)
 pip install -e ".[voyage]"
 
+# optional: run on Claude instead of Gemini
+pip install -e ".[anthropic]"
+
 # optional: the web UI
 pip install -e ".[web]"
 ```
 
-Then copy `.env.example` to `.env` and fill in `ANTHROPIC_API_KEY` and
-`GITHUB_TOKEN`.
+Then copy `.env.example` to `.env` and fill in `GOOGLE_API_KEY`
+([AI Studio](https://aistudio.google.com/apikey)) and `GITHUB_TOKEN`.
 
-> Anthropic does not serve an embeddings endpoint, which is why the embedding
-> backend is configured separately from the chat model.
+> **Running on Claude instead.** Install the `[anthropic]` extra, then set
+> `PR_AGENT_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`. Everything else is
+> unchanged: both providers are driven through the same LangChain interface.
+
+> The embedding backend is configured separately from the chat model —
+> Anthropic serves no embeddings endpoint at all, and Gemini's is a separate
+> model and API call.
 
 ---
 
@@ -203,7 +212,8 @@ git fetch origin pull/123/head:pr-123 && git checkout pr-123
 | `--validate` | none | A check to run after each change. Repeatable. |
 | `--auto-validate` | off | Detect checks from the repo (ruff, pytest, npm, go). |
 | `--max-fix-attempts` | 3 | Retries after a failing check before rolling back. |
-| `--embeddings` | `none` | `local`, `voyage` or `none`. |
+| `--provider` | `google` | `google` (Gemini) or `anthropic` (Claude). |
+| `--embeddings` | `none` | `google`, `local`, `voyage` or `none`. |
 | `--comment-id` | all | Only handle these comment ids. Repeatable. |
 | `--ignore-author` | none | Skip a login's comments. Repeatable. |
 | `--self-login` | none | The agent's own login, so it skips threads it already answered. |
@@ -244,9 +254,10 @@ Notable ones:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PR_AGENT_MODEL` | `claude-opus-5` | Any current Claude model id. |
-| `PR_AGENT_THINKING` | `true` | Adaptive thinking. |
-| `PR_AGENT_EMBEDDINGS` | `none` | `local`, `voyage`, `none`. |
+| `PR_AGENT_PROVIDER` | `google` | `google` (Gemini) or `anthropic` (Claude). |
+| `PR_AGENT_MODEL` | per provider | `gemini-3.8-flash` / `claude-opus-5`. Pro-tier Gemini models need a paid API plan. |
+| `PR_AGENT_THINKING` | `true` | The model decides how much to think. Gemini 3 models always think. |
+| `PR_AGENT_EMBEDDINGS` | `none` | `google`, `local`, `voyage`, `none`. |
 | `PR_AGENT_VALIDATE` | empty | `';;'`-separated commands. |
 | `PR_AGENT_RETRIEVAL_K` | `8` | Chunks fed to the planner. |
 | `GITHUB_API_URL` | github.com | Point at GitHub Enterprise here. |
@@ -279,10 +290,10 @@ src/pr_agent/
 ├── prompts.py         # one prompt per stage
 ├── validation.py      # runs your checks
 ├── git_ops.py         # commit, push with backoff
-├── llm.py             # Claude via langchain-anthropic
+├── llm.py             # Gemini or Claude, one LangChain interface
 ├── rag/
 │   ├── splitter.py    # language-aware chunking with line metadata
-│   ├── embeddings.py  # local / voyage / none
+│   ├── embeddings.py  # google / local / voyage / none
 │   ├── index.py       # incremental build + persistence
 │   └── retriever.py   # code-aware BM25 + RRF fusion
 ├── graph/

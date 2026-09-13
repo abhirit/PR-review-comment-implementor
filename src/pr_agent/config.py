@@ -5,19 +5,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-# Anthropic does not ship an embeddings endpoint, so the embedding backend is a
-# separate, pluggable choice from the chat model.
-EmbeddingBackend = str  # one of: "local", "voyage", "none"
+# Chat provider. Gemini is the default; Claude stays supported so an existing
+# ANTHROPIC_API_KEY setup keeps working by setting PR_AGENT_PROVIDER=anthropic.
+Provider = str  # one of: "google", "anthropic"
+
+# The chat provider does not decide the embedding backend: Anthropic serves no
+# embeddings endpoint at all, and Gemini's is a separate model and API call, so
+# the backend stays a pluggable choice of its own.
+EmbeddingBackend = str  # one of: "local", "google", "voyage", "none"
+
+DEFAULT_MODELS = {
+    # Pro-tier Gemini models are not served on the free API tier, so the
+    # default is the newest flash model, which is.
+    "google": "gemini-3.8-flash",
+    "anthropic": "claude-opus-5",
+}
+
+_PROVIDER_ALIASES = {
+    "google": "google",
+    "gemini": "google",
+    "google-genai": "google",
+    "googlegenai": "google",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+}
 
 
 class Settings(BaseSettings):
     """Runtime configuration.
 
     Every field can be set via environment variable (or a .env file) using the
-    upper-cased field name, e.g. ``ANTHROPIC_API_KEY``, ``PR_AGENT_MODEL``.
+    upper-cased field name, e.g. ``GOOGLE_API_KEY``, ``PR_AGENT_MODEL``.
     """
 
     model_config = SettingsConfigDict(
@@ -28,15 +49,23 @@ class Settings(BaseSettings):
     )
 
     # --- credentials -----------------------------------------------------
+    google_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        serialization_alias="GOOGLE_API_KEY",
+    )
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
     voyage_api_key: str | None = Field(default=None, alias="VOYAGE_API_KEY")
 
     # --- model -----------------------------------------------------------
-    model: str = Field(default="claude-opus-5", alias="PR_AGENT_MODEL")
+    provider: Provider = Field(default="google", alias="PR_AGENT_PROVIDER")
+    # Left empty, the model id defaults to DEFAULT_MODELS[provider].
+    model: str = Field(default="", alias="PR_AGENT_MODEL")
     max_tokens: int = Field(default=16000, alias="PR_AGENT_MAX_TOKENS")
-    # Adaptive thinking: Claude decides when and how deeply to think. The older
-    # fixed `budget_tokens` form is rejected by current models.
+    # Let the model decide how much to think per request: adaptive thinking on
+    # Claude, the model's own default thinking level on Gemini. Turning this
+    # off asks for no thinking at all, which Gemini 3 models do not allow.
     thinking: bool = Field(default=True, alias="PR_AGENT_THINKING")
     request_timeout: float = Field(default=600.0, alias="PR_AGENT_REQUEST_TIMEOUT")
 
@@ -55,6 +84,9 @@ class Settings(BaseSettings):
         default="sentence-transformers/all-MiniLM-L6-v2",
         alias="PR_AGENT_EMBEDDING_MODEL",
     )
+    google_embedding_model: str = Field(
+        default="models/gemini-embedding-001", alias="PR_AGENT_GOOGLE_EMBEDDING_MODEL"
+    )
     voyage_model: str = Field(default="voyage-code-3", alias="PR_AGENT_VOYAGE_MODEL")
     index_dir: Path = Field(default=Path(".pr_agent/index"), alias="PR_AGENT_INDEX_DIR")
     chunk_size: int = Field(default=1200, alias="PR_AGENT_CHUNK_SIZE")
@@ -72,6 +104,37 @@ class Settings(BaseSettings):
     )
     validate_timeout: int = Field(default=900, alias="PR_AGENT_VALIDATE_TIMEOUT")
 
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _normalise_provider(cls, value: object) -> object:
+        """Accept the names people actually type: 'gemini', 'claude', ..."""
+        if isinstance(value, str):
+            key = value.strip().lower()
+            if key not in _PROVIDER_ALIASES:
+                raise ValueError(
+                    f"Unknown provider '{value}'. Use 'google' (Gemini) or 'anthropic' (Claude)."
+                )
+            return _PROVIDER_ALIASES[key]
+        return value
+
+    @model_validator(mode="after")
+    def _default_model_for_provider(self) -> Settings:
+        if not self.model:
+            # Assign through __dict__ so this does not re-trigger validation.
+            self.__dict__["model"] = DEFAULT_MODELS[self.provider]
+            return self
+        # A model id from the other provider is a config mistake worth naming
+        # here rather than leaving to a 404 from the API.
+        name = self.model.lower().removeprefix("models/")
+        wrong = {"google": "claude", "anthropic": "gemini"}[self.provider]
+        if name.startswith(wrong):
+            other = "anthropic" if self.provider == "google" else "google"
+            raise ValueError(
+                f"Model '{self.model}' does not belong to provider '{self.provider}'. "
+                f"Set PR_AGENT_PROVIDER={other} to use it."
+            )
+        return self
+
     @field_validator("validate_commands", mode="before")
     @classmethod
     def _split_commands(cls, value: object) -> object:
@@ -86,6 +149,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         return value
+
+    @property
+    def llm_api_key(self) -> str | None:
+        """The API key for the configured chat provider, if one is set."""
+        if self.provider == "google":
+            return self.google_api_key
+        return self.anthropic_api_key
 
     def resolved_index_dir(self) -> Path:
         """Index directory, resolved relative to the repository when relative."""

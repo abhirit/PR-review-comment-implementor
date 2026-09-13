@@ -56,9 +56,10 @@ class SearchHit(BaseModel):
 class ConfigStatus(BaseModel):
     """What the server knows about its own configuration."""
 
-    anthropic_key_set: bool
+    llm_key_set: bool
     github_token_set: bool
     voyage_key_set: bool
+    provider: str
     model: str
     embedding_backend: str
     repo_path: str

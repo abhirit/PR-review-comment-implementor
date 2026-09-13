@@ -35,14 +35,15 @@ def test_static_assets_are_served(client):
 
 
 def test_config_reports_credential_presence(client, repo, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     body = client.get("/api/config", params={"repo_path": str(repo)}).json()
 
-    assert body["anthropic_key_set"] is True
+    assert body["llm_key_set"] is True
     assert body["github_token_set"] is False
-    assert body["model"] == "claude-opus-5"
+    assert body["provider"] == "google"
+    assert body["model"] == "gemini-3.8-flash"
     # A plain directory is not a git checkout.
     assert body["repo_is_git"] is False
 
