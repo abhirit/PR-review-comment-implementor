@@ -169,6 +169,39 @@ class ThreadOutcome(BaseModel):
         return self.action is CommentAction.IMPLEMENT and bool(self.files_changed)
 
 
+class BranchSwitch(BaseModel):
+    """How the checkout was moved onto the PR branch, and how to undo it.
+
+    Carried through the graph state so ``finalize`` can put the checkout back
+    exactly as it found it: the branch that was checked out, and the stash
+    entry holding whatever was uncommitted at the time.
+    """
+
+    branch: str
+    """The PR head branch the agent works on."""
+
+    previous_branch: str | None = None
+    """The branch checked out before the run, or ``"HEAD"`` if detached."""
+
+    previous_sha: str | None = None
+    """The commit that was checked out, used to restore a detached HEAD."""
+
+    switched: bool = False
+    """Whether the checkout actually moved. False when already on the branch."""
+
+    created: bool = False
+    """Whether the local branch had to be created from a remote ref."""
+
+    stash_sha: str | None = None
+    """Commit of the stash entry holding the pre-run changes, if any."""
+
+    detail: str = ""
+    """Human-readable account of what was done, for the report and the UI."""
+
+    restored: bool = False
+    restore_detail: str = ""
+
+
 def truncate(text: str, limit: int) -> str:
     """Trim ``text`` to ``limit`` characters, keeping the head and the tail."""
     if len(text) <= limit:

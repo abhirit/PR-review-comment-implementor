@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from .models import truncate
 from .rag.retriever import HybridRetriever
 from .workspace import Workspace, WorkspaceError
 
@@ -61,9 +63,15 @@ class ListDirArgs(BaseModel):
 
 
 def build_file_tools(
-    workspace: Workspace, retriever: HybridRetriever | None = None
+    workspace: Workspace,
+    retriever: HybridRetriever | None = None,
+    allow_edits: bool = True,
 ) -> list[StructuredTool]:
-    """Build the tool set the implement node binds to the model."""
+    """Build the tool set the implement node binds to the model.
+
+    With ``allow_edits`` off the writing tools are left out entirely, so a
+    read-only caller cannot change the checkout even if the model tries.
+    """
 
     def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
         try:
@@ -129,7 +137,7 @@ def build_file_tools(
             entries.append(f"{rel}/" if child.is_dir() else rel)
         return "\n".join(entries) if entries else f"{path} is empty."
 
-    return [
+    tools = [
         StructuredTool.from_function(
             func=read_file,
             name="read_file",
@@ -138,24 +146,6 @@ def build_file_tools(
                 "before editing it."
             ),
             args_schema=ReadFileArgs,
-        ),
-        StructuredTool.from_function(
-            func=edit_file,
-            name="edit_file",
-            description=(
-                "Replace an exact block of text in a file. The preferred way to make "
-                "a change. old_text must match the file byte for byte."
-            ),
-            args_schema=EditFileArgs,
-        ),
-        StructuredTool.from_function(
-            func=write_file,
-            name="write_file",
-            description=(
-                "Write a file in full, creating it if needed. Use only for new files "
-                "or a complete rewrite; prefer edit_file otherwise."
-            ),
-            args_schema=WriteFileArgs,
         ),
         StructuredTool.from_function(
             func=search_repository,
@@ -179,3 +169,93 @@ def build_file_tools(
             args_schema=ListDirArgs,
         ),
     ]
+
+    if allow_edits:
+        tools[1:1] = [
+            StructuredTool.from_function(
+                func=edit_file,
+                name="edit_file",
+                description=(
+                    "Replace an exact block of text in a file. The preferred way to make "
+                    "a change. old_text must match the file byte for byte."
+                ),
+                args_schema=EditFileArgs,
+            ),
+            StructuredTool.from_function(
+                func=write_file,
+                name="write_file",
+                description=(
+                    "Write a file in full, creating it if needed. Use only for new files "
+                    "or a complete rewrite; prefer edit_file otherwise."
+                ),
+                args_schema=WriteFileArgs,
+            ),
+        ]
+    return tools
+
+
+# ---------------------------------------------------------------------------
+# Driving the model's tool calls
+#
+# Shared by the graph's implement and fix nodes and by the follow-up chat, so
+# all three execute tool calls the same way.
+# ---------------------------------------------------------------------------
+
+
+def run_tool_loop(
+    model,
+    tools: list[StructuredTool],
+    messages: list[BaseMessage],
+    max_iterations: int,
+) -> tuple[str, str]:
+    """Drive the model's tool calls until it answers with text.
+
+    ``messages`` is appended to in place, so a caller keeping a conversation
+    across turns gets the tool calls and their results in its own history.
+    Returns ``(summary, error)``; ``error`` is empty on success.
+    """
+    by_name = {tool.name: tool for tool in tools}
+
+    for _ in range(max_iterations):
+        try:
+            response = model.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 - surface, do not crash the run
+            log.error("Model call failed: %s", exc)
+            return "", f"model call failed: {exc}"
+
+        assert isinstance(response, AIMessage)
+        messages.append(response)
+
+        tool_calls = response.tool_calls or []
+        if not tool_calls:
+            return text_of(response), ""
+
+        for call in tool_calls:
+            tool = by_name.get(call["name"])
+            if tool is None:
+                result = f"ERROR: unknown tool {call['name']!r}"
+            else:
+                try:
+                    result = tool.invoke(call["args"])
+                except Exception as exc:  # noqa: BLE001 - report back to the model
+                    result = f"ERROR: {exc}"
+            log.debug("tool %s -> %s", call["name"], str(result)[:200])
+            messages.append(
+                ToolMessage(content=truncate(str(result), 30000), tool_call_id=call["id"])
+            )
+
+    return "", f"gave up after {max_iterations} tool iterations without a final answer"
+
+
+def text_of(message: AIMessage) -> str:
+    """Extract plain text from a response that may contain thinking blocks."""
+    content = message.content
+    if isinstance(content, str):
+        return content.strip()
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+    return "\n".join(parts).strip()

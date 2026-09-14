@@ -9,11 +9,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from .. import prompts
 from ..github_client import build_threads
 from ..models import (
+    BranchSwitch,
     ChangePlan,
     CommentAction,
     ReviewThread,
@@ -23,7 +24,7 @@ from ..models import (
     truncate,
 )
 from ..rag.retriever import render_chunks
-from ..tools import build_file_tools
+from ..tools import build_file_tools, run_tool_loop, text_of
 from ..validation import run_validation
 from .state import AgentState
 
@@ -83,7 +84,32 @@ def _is_candidate(thread: ReviewThread, deps: AgentDeps) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 2. Index the repository for retrieval
+# 2. Put the checkout on the pull request's branch
+# ---------------------------------------------------------------------------
+
+
+def make_prepare_branch(deps: AgentDeps):
+    def prepare_branch(state: AgentState) -> AgentState:
+        from .. import git_ops
+
+        pr = state.get("pull_request")
+        if pr is None or not deps.checkout_branch:
+            return {}
+
+        # Editing the wrong branch produces plausible-looking changes against
+        # code the reviewer never saw, so a failure here stops the run rather
+        # than carrying on with whatever happens to be checked out.
+        switch = git_ops.prepare_branch(
+            deps.workspace.root, pr.head_ref, pr_number=deps.pr_ref.number
+        )
+        log.info("branch: %s", switch.detail)
+        return {"branch_switch": switch}
+
+    return prepare_branch
+
+
+# ---------------------------------------------------------------------------
+# 3. Index the repository for retrieval
 # ---------------------------------------------------------------------------
 
 
@@ -96,7 +122,7 @@ def make_index_repo(deps: AgentDeps):
 
 
 # ---------------------------------------------------------------------------
-# 3. Pick the next thread off the queue
+# 4. Pick the next thread off the queue
 # ---------------------------------------------------------------------------
 
 
@@ -134,7 +160,7 @@ def make_next_thread(deps: AgentDeps):
 
 
 # ---------------------------------------------------------------------------
-# 4. Triage
+# 5. Triage
 # ---------------------------------------------------------------------------
 
 
@@ -166,7 +192,7 @@ def make_triage(deps: AgentDeps):
 
 
 # ---------------------------------------------------------------------------
-# 5. Retrieve context (RAG)
+# 6. Retrieve context (RAG)
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +244,7 @@ def _pinned_context(deps: AgentDeps, thread: ReviewThread) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 6. Plan
+# 7. Plan
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +282,7 @@ def make_plan(deps: AgentDeps):
 
 
 # ---------------------------------------------------------------------------
-# 7. Implement
+# 8. Implement
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +306,7 @@ def make_implement(deps: AgentDeps):
             SystemMessage(prompts.IMPLEMENT_SYSTEM),
             HumanMessage(task),
         ]
-        summary, error = _run_tool_loop(
+        summary, error = run_tool_loop(
             model, tools, messages, deps.settings.max_tool_iterations
         )
         changed = sorted(deps.workspace.touched - before)
@@ -307,7 +333,7 @@ def make_fix(deps: AgentDeps):
             state.get("files_changed", []),
         )
         messages: list[BaseMessage] = [SystemMessage(prompts.FIX_SYSTEM), HumanMessage(task)]
-        summary, error = _run_tool_loop(
+        summary, error = run_tool_loop(
             model, tools, messages, deps.settings.max_tool_iterations
         )
         changed = sorted(set(state.get("files_changed", [])) | (deps.workspace.touched - before))
@@ -323,65 +349,8 @@ def make_fix(deps: AgentDeps):
     return fix
 
 
-def _run_tool_loop(
-    model,
-    tools,
-    messages: list[BaseMessage],
-    max_iterations: int,
-) -> tuple[str, str]:
-    """Drive the model's tool calls until it answers with text.
-
-    Returns ``(summary, error)``; ``error`` is empty on success.
-    """
-    by_name = {tool.name: tool for tool in tools}
-
-    for _ in range(max_iterations):
-        try:
-            response = model.invoke(messages)
-        except Exception as exc:  # noqa: BLE001 - surface, do not crash the run
-            log.error("Model call failed: %s", exc)
-            return "", f"model call failed: {exc}"
-
-        assert isinstance(response, AIMessage)
-        messages.append(response)
-
-        tool_calls = response.tool_calls or []
-        if not tool_calls:
-            return _text_of(response), ""
-
-        for call in tool_calls:
-            tool = by_name.get(call["name"])
-            if tool is None:
-                result = f"ERROR: unknown tool {call['name']!r}"
-            else:
-                try:
-                    result = tool.invoke(call["args"])
-                except Exception as exc:  # noqa: BLE001 - report back to the model
-                    result = f"ERROR: {exc}"
-            log.debug("tool %s -> %s", call["name"], str(result)[:200])
-            messages.append(
-                ToolMessage(content=truncate(str(result), 30000), tool_call_id=call["id"])
-            )
-
-    return "", f"gave up after {max_iterations} tool iterations without a final answer"
-
-
-def _text_of(message: AIMessage) -> str:
-    """Extract plain text from a response that may contain thinking blocks."""
-    content = message.content
-    if isinstance(content, str):
-        return content.strip()
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-    return "\n".join(parts).strip()
-
-
 # ---------------------------------------------------------------------------
-# 8. Validate
+# 9. Validate
 # ---------------------------------------------------------------------------
 
 
@@ -406,7 +375,7 @@ def make_validate(deps: AgentDeps):
 
 
 # ---------------------------------------------------------------------------
-# 9. Record the outcome for this thread
+# 10. Record the outcome for this thread
 # ---------------------------------------------------------------------------
 
 
@@ -505,11 +474,11 @@ def _compose_reply(
         log.error("Could not compose a reply for thread %s: %s", thread.id, exc)
         return ""
     assert isinstance(response, AIMessage)
-    return _text_of(response)
+    return text_of(response)
 
 
 # ---------------------------------------------------------------------------
-# 10. Finalize: commit, push, reply
+# 11. Finalize: commit, push, reply
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +492,8 @@ def make_finalize(deps: AgentDeps):
 
         if deps.dry_run:
             log.info("Dry run: not committing, pushing or replying.")
-            return {"report": build_report(state, dry_run=True)}
+            _restore_branch(deps, state, updates)
+            return {**updates, "report": build_report({**state, **updates}, dry_run=True)}
 
         if implemented and deps.commit:
             message = _commit_message(state, implemented)
@@ -568,11 +538,39 @@ def make_finalize(deps: AgentDeps):
             updates["replies_posted"] = posted
             log.info("Posted %d repl(y|ies)", posted)
 
+        _restore_branch(deps, state, updates)
+
         merged = {**state, **updates}
         updates["report"] = build_report(merged, dry_run=False)
         return updates
 
     return finalize
+
+
+def _restore_branch(deps: AgentDeps, state: AgentState, updates: AgentState) -> None:
+    """Hand the checkout back the way it was found, if the run asked for it.
+
+    Skipped when a commit was made but could not be pushed: the work only
+    exists on this branch, and walking away from it would hide that.
+    """
+    from .. import git_ops
+
+    switch = state.get("branch_switch")
+    if not deps.restore_branch or not isinstance(switch, BranchSwitch):
+        return
+    if not switch.switched and not switch.stash_sha:
+        return
+    if deps.push and updates.get("commit_sha") and not updates.get("pushed"):
+        log.warning(
+            "Staying on %s: the commit was not pushed, so the work is only on this branch.",
+            switch.branch,
+        )
+        return
+
+    restored = git_ops.restore_branch(deps.workspace.root, switch)
+    if restored.restore_detail:
+        log.info("branch: %s", restored.restore_detail)
+    updates["branch_switch"] = restored
 
 
 def _commit_message(state: AgentState, implemented: list[ThreadOutcome]) -> str:
@@ -598,6 +596,11 @@ def build_report(state: AgentState, dry_run: bool) -> str:
     lines.append(header)
     if dry_run:
         lines.append("(dry run — nothing was committed, pushed or posted)")
+    switch = state.get("branch_switch")
+    if isinstance(switch, BranchSwitch) and switch.detail:
+        lines.append(f"Branch: {switch.detail}")
+        if switch.restore_detail:
+            lines.append(f"        {switch.restore_detail}")
     if state.get("index_summary"):
         lines.append(f"Index: {state['index_summary']}")
     lines.append("")

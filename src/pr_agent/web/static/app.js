@@ -18,6 +18,8 @@ const state = {
   liveThread: null,
   stages: [],
   logLines: 0,
+  chatRunId: null,
+  chatBusy: false,
 };
 
 /* ------------------------------------------------------------------ utils */
@@ -63,6 +65,7 @@ function showTab(name) {
   $$(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.tab === name));
   $$(".tabpanel").forEach((p) => p.classList.toggle("is-active", p.dataset.panel === name));
   if (name === "history") loadHistory();
+  if (name === "chat") loadChat();
 }
 $$(".tab").forEach((tab) => tab.addEventListener("click", () => showTab(tab.dataset.tab)));
 
@@ -104,13 +107,24 @@ async function loadConfig() {
   }
 
   const hint = $("#repo-hint");
+  const willCheckout = $("#checkout_branch").checked;
+  const willRestore = willCheckout && $("#restore_branch").checked;
   if (!config.repo_is_git) {
-    hint.textContent = "Not a git checkout. The agent can still edit files, but cannot commit.";
+    hint.textContent = "Not a git checkout. The agent can still edit files, but cannot commit or switch branch.";
+  } else if (config.repo_dirty && willCheckout) {
+    hint.textContent = `On ${config.repo_branch}, with uncommitted changes — they will be stashed before the switch`
+      + (willRestore ? " and restored after." : ", and left stashed.");
   } else if (config.repo_dirty) {
     hint.textContent = `On ${config.repo_branch}, with uncommitted changes. Only files the agent edits are staged.`;
+  } else if (willCheckout) {
+    hint.textContent = `On ${config.repo_branch}. The PR branch will be checked out here.`;
   } else {
-    hint.textContent = `On ${config.repo_branch}. Check out the PR branch before running.`;
+    hint.textContent = `On ${config.repo_branch}. Check out the PR branch yourself before running.`;
   }
+
+  $("#checkout-hint").textContent = config.repo_has_stash
+    ? "Uncommitted work is stashed before the switch. This checkout already has a stash; the agent only ever pops its own entry."
+    : "Uncommitted work is stashed before the switch.";
 
   if (!$("#validate").value && config.detected_validate_commands.length) {
     $("#detect-checks").textContent =
@@ -131,6 +145,10 @@ $("#detect-checks").addEventListener("click", async () => {
 });
 
 $("#repo_path").addEventListener("change", loadConfig);
+$("#checkout_branch").addEventListener("change", () => {
+  syncBranchOptions();
+  loadConfig();
+});
 
 /* ---------------------------------------------------------------- threads */
 
@@ -230,8 +248,24 @@ $("#select-none").addEventListener("click", () => {
 function syncModeOptions() {
   const mode = $("input[name=mode]:checked").value;
   $("#publish-options").hidden = mode !== "full";
+  // Publishing is the case where leaving you on the PR branch buys nothing:
+  // the commit is already on the remote. Default to handing the checkout back
+  // there, and leave the box free to override in either direction.
+  $("#restore_branch").checked = mode === "full";
+  syncBranchOptions();
 }
-$$("input[name=mode]").forEach((r) => r.addEventListener("change", syncModeOptions));
+
+function syncBranchOptions() {
+  const checkout = $("#checkout_branch").checked;
+  const restore = $("#restore_branch");
+  restore.disabled = !checkout;
+  if (!checkout) restore.checked = false;
+}
+$$("input[name=mode]").forEach((r) => r.addEventListener("change", () => {
+  syncModeOptions();
+  loadConfig();
+}));
+$("#restore_branch").addEventListener("change", loadConfig);
 syncModeOptions();
 
 function buildRunRequest() {
@@ -250,6 +284,8 @@ function buildRunRequest() {
     dry_run: mode === "dry",
     commit: mode !== "dry",
     push: mode === "full" && $("#push").checked,
+    checkout_branch: $("#checkout_branch").checked,
+    restore_branch: $("#checkout_branch").checked && $("#restore_branch").checked,
     reply: mode === "full" && $("#reply").checked,
     resolve: mode === "full" && $("#resolve").checked,
     comment_ids: allSelected ? [] : Array.from(state.selected),
@@ -310,6 +346,7 @@ $("#cancel-run").addEventListener("click", async () => {
 
 const STAGES = [
   ["load_pr", "Load PR"],
+  ["prepare_branch", "Checkout"],
   ["index_repo", "Index"],
   ["triage", "Triage"],
   ["retrieve", "Retrieve"],
@@ -347,6 +384,7 @@ function startWatching(runId, request) {
 
   renderPipeline(null);
   setRunStatus("starting");
+  bindChat(runId);
   $("#cancel-run").hidden = false;
   $("#start-run").disabled = true;
   showTab("run");
@@ -419,6 +457,13 @@ function handleEvent(event) {
       banner("info", `Index: ${event.summary}`);
       break;
 
+    case "branch": {
+      const detail = [event.branch.detail, event.branch.restore_detail]
+        .filter(Boolean).join(" ");
+      if (detail) banner("info", detail);
+      break;
+    }
+
     case "thread_start":
       state.liveThread = event.thread;
       liveCard(event.thread);
@@ -480,6 +525,7 @@ function handleEvent(event) {
       setRunStatus(event.status);
       if (state.source) state.source.close();
       loadHistory();
+      if (state.chatRunId === state.runId) loadChat();
       break;
 
     default:
@@ -630,6 +676,111 @@ async function replayRun(runId) {
   }
   showTab("run");
 }
+
+/* ------------------------------------------------------------------- chat */
+
+function bindChat(runId) {
+  if (state.chatRunId === runId) return;
+  state.chatRunId = runId;
+  $("#chat-log").replaceChildren();
+  $("#chat-run").textContent = "";
+  loadChat();
+}
+
+async function loadChat() {
+  const runId = state.chatRunId;
+  $("#chat-empty").hidden = Boolean(runId);
+  $("#chat-view").hidden = !runId;
+  if (!runId) return;
+
+  let history;
+  try { history = await api(`/api/runs/${runId}/chat`); } catch (err) {
+    toast(err.message, true);
+    return;
+  }
+
+  $("#chat-run").textContent = history.available
+    ? [`run ${runId}`, history.branch && `editing ${history.branch}`]
+        .filter(Boolean).join(" · ")
+    : history.detail;
+  $("#chat-send").disabled = !history.available || state.chatBusy;
+  $("#chat-input").disabled = !history.available;
+
+  const log = $("#chat-log");
+  log.replaceChildren();
+  if (!history.messages.length) {
+    log.appendChild(el("p", "empty",
+      "Nothing asked yet. The agent already knows what this run changed and why."));
+    return;
+  }
+  history.messages.forEach(renderChatTurn);
+}
+
+function renderChatTurn(turn) {
+  const log = $("#chat-log");
+  if (log.querySelector(".empty")) log.replaceChildren();
+
+  const bubble = el("div", `chat-turn ${turn.role}`);
+  bubble.appendChild(el("div", "chat-role", turn.role === "user" ? "You" : "Agent"));
+
+  if (turn.text) bubble.appendChild(el("div", "chat-text", turn.text));
+  if (turn.files_changed && turn.files_changed.length) {
+    chips(bubble, "Files changed", turn.files_changed);
+  }
+  if (turn.diff) renderDiff(bubble, turn.diff);
+  if (turn.error) {
+    const problem = el("div", "chat-error", turn.error);
+    bubble.appendChild(problem);
+  }
+  if (!turn.text && !turn.error) {
+    bubble.appendChild(el("div", "chat-text muted", "(the agent replied with nothing)"));
+  }
+
+  log.appendChild(bubble);
+  bubble.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return bubble;
+}
+
+$("#chat-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = $("#chat-input");
+  const message = input.value.trim();
+  if (!message || !state.chatRunId || state.chatBusy) return;
+
+  const allowEdits = $("#chat-allow-edits").checked;
+  renderChatTurn({ role: "user", text: message });
+  input.value = "";
+
+  state.chatBusy = true;
+  $("#chat-send").disabled = true;
+  const pending = renderChatTurn({ role: "agent", text: "Thinking…" });
+  pending.classList.add("is-pending");
+
+  try {
+    const turn = await api(`/api/runs/${state.chatRunId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, allow_edits: allowEdits }),
+    });
+    pending.remove();
+    renderChatTurn(turn);
+  } catch (err) {
+    pending.remove();
+    renderChatTurn({ role: "agent", text: "", error: err.message });
+  } finally {
+    state.chatBusy = false;
+    $("#chat-send").disabled = false;
+    input.focus();
+  }
+});
+
+// Enter sends; Shift+Enter is a newline, as in every other chat box.
+$("#chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("#chat-form").requestSubmit();
+  }
+});
 
 /* ----------------------------------------------------------------- search */
 

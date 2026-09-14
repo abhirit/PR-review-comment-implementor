@@ -81,6 +81,9 @@ def make_deps(repo, llm, github, **behaviour) -> AgentDeps:
         max_fix_attempts=behaviour.pop("max_fix_attempts", 0),
     )
     workspace = Workspace(root=repo)
+    # Most of these tests run against a fixture with no remote to fetch the
+    # PR branch from, so the checkout step is opt-in here; it has its own tests.
+    behaviour.setdefault("checkout_branch", False)
     return AgentDeps(
         settings=settings,
         pr_ref=PR_REF,
@@ -442,3 +445,131 @@ def test_report_is_always_produced(repo, action):
     final = run(deps)
     assert final["report"]
     assert "octo/demo#1" in final["report"]
+# -- branch handling ------------------------------------------------------
+
+
+def _git_repo_with_pr_branch(repo):
+    """The fixture repo, committed on main with the PR's head branch beside it."""
+    import subprocess
+
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@e.com"],
+        ["git", "config", "user.name", "T"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-qm", "init"],
+        ["git", "branch", "feature/calc"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+    return repo
+
+
+def test_the_run_checks_out_the_pr_branch(repo):
+    from pr_agent import git_ops
+
+    _git_repo_with_pr_branch(repo)
+
+    deps = make_deps(repo, implementing_llm(), FakeGitHub([comment()]), checkout_branch=True)
+    final = run(deps)
+
+    assert git_ops.current_branch(repo) == "feature/calc"
+    assert final["branch_switch"].switched
+    assert "Branch:" in final["report"]
+
+
+def test_uncommitted_work_is_stashed_and_handed_back(repo):
+    from pr_agent import git_ops
+
+    _git_repo_with_pr_branch(repo)
+    (repo / "WIP.txt").write_text("my half-finished notes\n", encoding="utf-8")
+
+    deps = make_deps(
+        repo,
+        implementing_llm(),
+        FakeGitHub([comment()]),
+        checkout_branch=True,
+        restore_branch=True,
+        commit=True,
+    )
+    final = run(deps)
+
+    # The change was committed on the PR branch...
+    assert final["commit_sha"]
+    # ...and the checkout was handed back exactly as it was found.
+    assert git_ops.current_branch(repo) == "main"
+    assert (repo / "WIP.txt").read_text(encoding="utf-8") == "my half-finished notes\n"
+    assert git_ops.stash_count(repo) == 0
+    assert final["branch_switch"].restored
+
+
+def test_an_unpushed_commit_keeps_the_checkout_on_the_pr_branch(repo):
+    """Walking away from work that only exists locally would hide it."""
+    from pr_agent import git_ops
+
+    _git_repo_with_pr_branch(repo)
+
+    deps = make_deps(
+        repo,
+        implementing_llm(),
+        FakeGitHub([comment()]),
+        checkout_branch=True,
+        restore_branch=True,
+        commit=True,
+        push=True,  # there is no remote, so the push fails
+    )
+    final = run(deps)
+
+    assert final["commit_sha"]
+    assert not final.get("pushed")
+    assert git_ops.current_branch(repo) == "feature/calc"
+    assert not final["branch_switch"].restored
+
+
+def test_a_dry_run_still_hands_the_checkout_back(repo):
+    from pr_agent import git_ops
+
+    _git_repo_with_pr_branch(repo)
+    (repo / "WIP.txt").write_text("notes\n", encoding="utf-8")
+
+    deps = make_deps(
+        repo,
+        implementing_llm(),
+        FakeGitHub([comment()]),
+        checkout_branch=True,
+        restore_branch=True,
+        dry_run=True,
+    )
+    run(deps)
+
+    assert git_ops.current_branch(repo) == "main"
+    assert (repo / "WIP.txt").read_text(encoding="utf-8") == "notes\n"
+
+
+def test_a_branch_that_cannot_be_checked_out_stops_the_run(repo):
+    """Editing the wrong branch is worse than not running at all."""
+    import subprocess
+
+    from pr_agent import git_ops
+
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+
+    deps = make_deps(repo, implementing_llm(), FakeGitHub([comment()]), checkout_branch=True)
+
+    with pytest.raises(git_ops.GitError):
+        run(deps)
+
+
+def test_the_checkout_can_be_turned_off(repo):
+    from pr_agent import git_ops
+
+    _git_repo_with_pr_branch(repo)
+
+    deps = make_deps(repo, implementing_llm(), FakeGitHub([comment()]), checkout_branch=False)
+    final = run(deps)
+
+    assert git_ops.current_branch(repo) == "main"
+    assert final.get("branch_switch") is None

@@ -50,6 +50,16 @@ def run(
     ),
     commit: bool = typer.Option(True, "--commit/--no-commit", help="Commit the changes."),
     push: bool = typer.Option(False, "--push", help="Push the commit to the PR's head branch."),
+    checkout: bool = typer.Option(
+        True,
+        "--checkout/--no-checkout",
+        help="Check the PR's head branch out first, stashing any uncommitted work.",
+    ),
+    restore_branch: bool = typer.Option(
+        False,
+        "--restore-branch",
+        help="When the run is done, return to the original branch and unstash.",
+    ),
     reply: bool = typer.Option(
         False, "--reply", help="Post a reply on each review thread that was handled."
     ),
@@ -123,10 +133,19 @@ def run(
 
     try:
         if git_ops.is_dirty(settings.repo_path):
-            console.print(
-                "[yellow]The working tree has uncommitted changes. The agent stages only "
-                "the files it edits, so your work will not be swept into its commit.[/yellow]"
-            )
+            if not checkout:
+                fate = (
+                    "The agent stages only the files it edits, so your work will not be "
+                    "swept into its commit."
+                )
+            elif restore_branch:
+                fate = "They will be stashed before the PR branch is checked out, and restored after."
+            else:
+                fate = (
+                    "They will be stashed before the PR branch is checked out. "
+                    "Pass --restore-branch to get them back automatically."
+                )
+            console.print(f"[yellow]The working tree has uncommitted changes. {fate}[/yellow]")
     except git_ops.GitError:
         pass  # not a git checkout, or git is unavailable
 
@@ -137,6 +156,8 @@ def run(
             dry_run=dry_run,
             commit=commit,
             push=push,
+            checkout_branch=checkout,
+            restore_branch=restore_branch,
             write_replies=reply or resolve,
             resolve_threads=resolve,
             include_review_bodies=include_review_bodies,
@@ -158,6 +179,9 @@ def run(
 
     try:
         final = graph.invoke(initial_state(), config=config)
+    except git_ops.GitError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
     finally:
         deps.github.close()
 

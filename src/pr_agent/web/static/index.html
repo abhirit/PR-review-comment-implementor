@@ -33,7 +33,21 @@
 
         <label for="repo_path">Local checkout</label>
         <input id="repo_path" name="repo_path" type="text" value="." required>
-        <p class="hint" id="repo-hint">Check out the PR branch here before running.</p>
+        <p class="hint" id="repo-hint">The agent checks the PR branch out here.</p>
+
+        <div class="sub-options">
+          <label class="check">
+            <input type="checkbox" id="checkout_branch" checked>
+            Check out the PR branch first
+          </label>
+          <label class="check">
+            <input type="checkbox" id="restore_branch">
+            Go back to your branch afterwards
+          </label>
+          <p class="hint" id="checkout-hint">
+            Uncommitted work is stashed before the switch.
+          </p>
+        </div>
 
         <button type="button" class="btn btn-secondary full" id="load-threads">
           Load review threads
@@ -123,6 +137,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab is-active" role="tab" data-tab="threads">Review threads</button>
       <button class="tab" role="tab" data-tab="run">Run<span class="tab-badge" id="run-badge" hidden></span></button>
+      <button class="tab" role="tab" data-tab="chat">Chat</button>
       <button class="tab" role="tab" data-tab="search">Retrieval</button>
       <button class="tab" role="tab" data-tab="history">History</button>
     </nav>
@@ -165,6 +180,35 @@
           <summary>Activity log <span class="muted" id="log-count"></span></summary>
           <pre class="log" id="log"></pre>
         </details>
+      </div>
+    </div>
+
+    <!-- chat ---------------------------------------------------------- -->
+    <div class="tabpanel" data-panel="chat">
+      <div class="panel-head">
+        <h2>Chat about this run</h2>
+        <span class="muted" id="chat-run"></span>
+      </div>
+      <div id="chat-empty" class="empty">
+        Start a run, or open one from History, to ask about what it did.
+      </div>
+
+      <div id="chat-view" hidden>
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="chat-composer">
+          <textarea id="chat-input" rows="3"
+            placeholder="Ask why a comment was skipped, what a diff does, or for another change…"></textarea>
+          <div class="chat-actions">
+            <label class="check">
+              <input type="checkbox" id="chat-allow-edits" checked>
+              Let the reply edit files
+            </label>
+            <button type="submit" class="btn btn-primary" id="chat-send">Send</button>
+          </div>
+        </form>
+        <p class="hint">
+          Changes made here are written to the checkout but not committed. Review the diff, then commit them yourself.
+        </p>
       </div>
     </div>
 

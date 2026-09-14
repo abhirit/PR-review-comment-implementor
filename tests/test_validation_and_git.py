@@ -149,3 +149,147 @@ def test_current_branch_works_before_the_first_commit(tmp_path):
     # rev-parse HEAD fails on an unborn branch; the symbolic ref still resolves.
     subprocess.run(["git", "init", "-q", "-b", "trunk"], cwd=tmp_path, check=True)
     assert git_ops.current_branch(tmp_path) == "trunk"
+# -- branch switching -----------------------------------------------------
+
+
+def _branch(repo, name):
+    subprocess.run(["git", "branch", name], cwd=repo, check=True)
+
+
+def test_prepare_branch_switches_and_stashes(git_repo):
+    _branch(git_repo, "feature")
+    (git_repo / "a.txt").write_text("work in progress\n", encoding="utf-8")
+
+    switch = git_ops.prepare_branch(git_repo, "feature")
+
+    assert switch.switched
+    assert switch.previous_branch == "main"
+    assert switch.stash_sha
+    assert git_ops.current_branch(git_repo) == "feature"
+    # The work in progress went with the stash, not onto the PR branch.
+    assert not git_ops.is_dirty(git_repo)
+    assert (git_repo / "a.txt").read_text(encoding="utf-8") == "one\n"
+
+
+def test_restore_branch_puts_everything_back(git_repo):
+    _branch(git_repo, "feature")
+    (git_repo / "a.txt").write_text("work in progress\n", encoding="utf-8")
+    switch = git_ops.prepare_branch(git_repo, "feature")
+
+    restored = git_ops.restore_branch(git_repo, switch)
+
+    assert restored.restored
+    assert git_ops.current_branch(git_repo) == "main"
+    assert (git_repo / "a.txt").read_text(encoding="utf-8") == "work in progress\n"
+    assert git_ops.stash_count(git_repo) == 0
+
+
+def test_untracked_files_are_stashed_and_restored_too(git_repo):
+    _branch(git_repo, "feature")
+    (git_repo / "notes.txt").write_text("scratch\n", encoding="utf-8")
+
+    switch = git_ops.prepare_branch(git_repo, "feature")
+    assert not (git_repo / "notes.txt").exists()
+
+    git_ops.restore_branch(git_repo, switch)
+    assert (git_repo / "notes.txt").read_text(encoding="utf-8") == "scratch\n"
+
+
+def test_a_clean_tree_is_switched_without_a_stash(git_repo):
+    _branch(git_repo, "feature")
+
+    switch = git_ops.prepare_branch(git_repo, "feature")
+
+    assert switch.switched
+    assert switch.stash_sha is None
+    assert git_ops.stash_count(git_repo) == 0
+
+
+def test_already_on_the_branch_is_a_no_op(git_repo):
+    (git_repo / "a.txt").write_text("work in progress\n", encoding="utf-8")
+
+    switch = git_ops.prepare_branch(git_repo, "main")
+
+    assert not switch.switched
+    assert switch.stash_sha is None
+    assert "Already on main" in switch.detail
+    # Nothing was stashed, so the user's work is untouched.
+    assert git_ops.is_dirty(git_repo)
+
+
+def test_restoring_a_no_op_switch_does_nothing(git_repo):
+    switch = git_ops.prepare_branch(git_repo, "main")
+    assert git_ops.restore_branch(git_repo, switch) is switch
+
+
+def test_a_plain_directory_is_left_alone(tmp_path_factory):
+    plain = tmp_path_factory.mktemp("plain")
+    switch = git_ops.prepare_branch(plain, "feature")
+    assert not switch.switched
+    assert "Not a git checkout" in switch.detail
+
+
+def test_an_unreachable_branch_raises_and_restores_the_stash(git_repo):
+    (git_repo / "a.txt").write_text("work in progress\n", encoding="utf-8")
+
+    with pytest.raises(git_ops.GitError, match="no 'origin' remote"):
+        git_ops.prepare_branch(git_repo, "never-existed")
+
+    # The failure must not leave the user's work parked in the stash.
+    assert git_ops.stash_count(git_repo) == 0
+    assert (git_repo / "a.txt").read_text(encoding="utf-8") == "work in progress\n"
+
+
+def test_the_right_stash_entry_is_popped(git_repo):
+    """Another stash pushed on top must not be mistaken for ours."""
+    _branch(git_repo, "feature")
+    (git_repo / "a.txt").write_text("ours\n", encoding="utf-8")
+    switch = git_ops.prepare_branch(git_repo, "feature")
+
+    # Something else stashes while we are on the PR branch.
+    (git_repo / "a.txt").write_text("theirs\n", encoding="utf-8")
+    subprocess.run(["git", "stash", "push", "-qm", "someone else"], cwd=git_repo, check=True)
+
+    git_ops.restore_branch(git_repo, switch)
+
+    assert (git_repo / "a.txt").read_text(encoding="utf-8") == "ours\n"
+    assert git_ops.stash_count(git_repo) == 1  # theirs, still parked
+
+
+def test_restore_reports_a_stash_that_has_gone(git_repo):
+    _branch(git_repo, "feature")
+    (git_repo / "a.txt").write_text("work in progress\n", encoding="utf-8")
+    switch = git_ops.prepare_branch(git_repo, "feature")
+
+    subprocess.run(["git", "stash", "drop", "-q"], cwd=git_repo, check=True)
+    restored = git_ops.restore_branch(git_repo, switch)
+
+    assert restored.restored
+    assert "already gone" in restored.restore_detail
+
+
+def test_prepare_branch_creates_a_local_branch_from_the_remote(tmp_path):
+    origin = tmp_path / "origin"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=origin, check=True)
+    (origin / "a.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=origin, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=origin, check=True)
+    (origin / "b.txt").write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-qm", "feature work"], cwd=origin, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=origin, check=True)
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--single-branch", "-b", "main", str(origin), str(clone)],
+        check=True,
+    )
+
+    switch = git_ops.prepare_branch(clone, "feature")
+
+    assert switch.switched and switch.created
+    assert git_ops.current_branch(clone) == "feature"
+    assert (clone / "b.txt").exists()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, TypedDict
 
-from ..models import PullRequest, ReviewThread, ThreadOutcome, Triage
+from ..models import BranchSwitch, PullRequest, ReviewThread, ThreadOutcome, Triage
 
 
 def _replace(_current: Any, new: Any) -> Any:
@@ -24,6 +24,9 @@ class AgentState(TypedDict, total=False):
     pull_request: PullRequest | None
     threads: list[ReviewThread]
     index_summary: str
+
+    branch_switch: BranchSwitch | None
+    """How the checkout was moved onto the PR branch, and how to put it back."""
 
     # -- the work queue ---------------------------------------------------
     pending: list[int]
@@ -57,6 +60,7 @@ def initial_state() -> AgentState:
         pull_request=None,
         threads=[],
         index_summary="",
+        branch_switch=None,
         pending=[],
         current=None,
         triage=None,

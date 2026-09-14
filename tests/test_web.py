@@ -236,3 +236,144 @@ def test_search_reflects_files_changed_since_the_last_search(client, repo, monke
     hits = client.get("/api/search", params=params).json()
 
     assert [h["path"] for h in hits] == ["src/new_module.py"]
+# -- branch options --------------------------------------------------------
+
+
+def test_the_checkout_is_on_by_default(client):
+    assert RunRequest(pr="octo/demo#1").checkout_branch is True
+    assert RunRequest(pr="octo/demo#1").restore_branch is False
+
+
+def test_config_reports_a_stash(client, repo):
+    import subprocess
+
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@e.com"],
+        ["git", "config", "user.name", "T"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-qm", "init"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+
+    assert client.get("/api/config", params={"repo_path": str(repo)}).json()[
+        "repo_has_stash"
+    ] is False
+
+    (repo / "README.md").write_text("# changed\n", encoding="utf-8")
+    subprocess.run(["git", "stash", "push", "-qm", "wip"], cwd=repo, check=True)
+
+    assert client.get("/api/config", params={"repo_path": str(repo)}).json()[
+        "repo_has_stash"
+    ] is True
+
+
+# -- chat ------------------------------------------------------------------
+
+
+def test_chat_on_an_unknown_run_is_a_404(client):
+    assert client.get("/api/runs/deadbeef/chat").status_code == 404
+    assert client.post("/api/runs/deadbeef/chat", json={"message": "hi"}).status_code == 404
+
+
+def test_chat_starts_empty(client, repo, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    run_id = client.post(
+        "/api/runs", json={"pr": "octo/demo#1", "repo_path": str(repo)}
+    ).json()["run_id"]
+    _wait_for_end(client, run_id)
+
+    body = client.get(f"/api/runs/{run_id}/chat").json()
+
+    assert body["run_id"] == run_id
+    assert body["messages"] == []
+    assert body["available"] is True
+
+
+def test_chat_is_closed_while_the_run_is_going(client, repo):
+    """The run owns the checkout until it finishes; two writers would collide."""
+    from pathlib import Path as _Path
+
+    from pr_agent.web.runner import Run
+
+    manager = client.app.state.manager
+    live = Run(id="live", request=RunRequest(pr="octo/demo#1", repo_path=str(repo)))
+    live.status = "running"
+    manager._runs["live"] = live
+    manager._order.append("live")
+    manager._active_repos[str(_Path(repo).resolve())] = "live"
+
+    history = client.get("/api/runs/live/chat").json()
+    assert history["available"] is False
+    assert "still going" in history["detail"]
+
+    refused = client.post("/api/runs/live/chat", json={"message": "hello"})
+    assert refused.status_code == 409
+    assert "still going" in refused.json()["detail"]
+
+
+def test_chat_names_the_branch_a_change_would_land_on(client, repo, monkeypatch):
+    """After a restore the checkout is back on your branch, not the PR's."""
+    import subprocess
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@e.com"],
+        ["git", "config", "user.name", "T"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-qm", "init"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+
+    run_id = client.post(
+        "/api/runs", json={"pr": "octo/demo#1", "repo_path": str(repo)}
+    ).json()["run_id"]
+    _wait_for_end(client, run_id)
+
+    assert client.get(f"/api/runs/{run_id}/chat").json()["branch"] == "main"
+
+
+def test_an_empty_chat_message_is_rejected(client, repo, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    run_id = client.post(
+        "/api/runs", json={"pr": "octo/demo#1", "repo_path": str(repo)}
+    ).json()["run_id"]
+    _wait_for_end(client, run_id)
+
+    assert client.post(f"/api/runs/{run_id}/chat", json={"message": ""}).status_code == 422
+
+
+def test_a_message_is_answered_and_kept_in_the_history(client, repo, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("PR_AGENT_EMBEDDINGS", "none")
+    run_id = client.post(
+        "/api/runs", json={"pr": "octo/demo#1", "repo_path": str(repo)}
+    ).json()["run_id"]
+    _wait_for_end(client, run_id)
+
+    # Swap in a scripted model rather than calling a real provider.
+    from fakes import FakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from pr_agent.web import runner as runner_module
+
+    monkeypatch.setattr(
+        runner_module,
+        "build_chat_model",
+        lambda _settings: FakeChatModel(
+            tool_script=[AIMessage(content="Nothing was changed: the run could not start.")]
+        ),
+    )
+
+    reply = client.post(
+        f"/api/runs/{run_id}/chat", json={"message": "What did you change?"}
+    ).json()
+
+    assert reply["role"] == "agent"
+    assert "Nothing was changed" in reply["text"]
+    assert reply["files_changed"] == []
+
+    history = client.get(f"/api/runs/{run_id}/chat").json()["messages"]
+    assert [m["role"] for m in history] == ["user", "agent"]
+    assert history[0]["text"] == "What did you change?"

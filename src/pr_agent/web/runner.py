@@ -16,11 +16,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..chat import ChatSession, build_run_context
 from ..config import load_settings
 from ..github_client import GitHubClient
 from ..graph.build import build_agent_graph, build_deps
 from ..graph.state import initial_state
+from ..llm import build_chat_model
 from ..models import PRRef
+from ..rag.index import CodeIndex
+from ..workspace import Workspace
 from .schemas import RunRequest
 
 log = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ log = logging.getLogger(__name__)
 # Nodes the UI shows as pipeline stages, in order.
 STAGE_LABELS: dict[str, str] = {
     "load_pr": "Loading pull request",
+    "prepare_branch": "Checking out the branch",
     "index_repo": "Indexing repository",
     "next_thread": "Selecting comment",
     "triage": "Triaging",
@@ -59,6 +64,8 @@ class Run:
     report: str = ""
     outcomes: list[dict[str, Any]] = field(default_factory=list)
     threads: list[dict[str, Any]] = field(default_factory=list)
+    pr: dict[str, Any] | None = None
+    branch: dict[str, Any] | None = None
     _subscribers: set[asyncio.Queue] = field(default_factory=set, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -72,6 +79,8 @@ class Run:
             "report": self.report,
             "outcomes": self.outcomes,
             "threads": self.threads,
+            "pr": self.pr,
+            "branch": self.branch,
             "request": self.request.model_dump(),
             "events": self.events,
         }
@@ -102,6 +111,7 @@ class RunManager:
         self._max_history = max_history
         self._lock = threading.Lock()
         self._active_repos: dict[str, str] = {}  # resolved repo path -> run id
+        self._chats: dict[str, ChatSession] = {}  # run id -> follow-up conversation
 
     # -- accessors --------------------------------------------------------
 
@@ -181,6 +191,43 @@ class RunManager:
                 break  # never evict a live run
             self._order.pop(0)
             self._runs.pop(oldest, None)
+            self._chats.pop(oldest, None)
+
+    # -- follow-up chat ---------------------------------------------------
+
+    def peek_chat(self, run_id: str) -> ChatSession | None:
+        """The existing conversation for a run, without building one."""
+        return self._chats.get(run_id)
+
+    def chat_session(self, run: Run) -> ChatSession:
+        """The conversation about ``run``, built on first use.
+
+        One session per run, so a question three messages in still knows what
+        the first two established.
+        """
+        existing = self._chats.get(run.id)
+        if existing is not None:
+            return existing
+
+        settings = load_settings(
+            repo_path=Path(run.request.repo_path),
+            model=run.request.model,
+            embedding_backend=run.request.embeddings,
+        )
+        workspace = Workspace(
+            root=settings.repo_path, max_file_bytes=settings.max_index_file_bytes
+        )
+        session = ChatSession(
+            settings=settings,
+            workspace=workspace,
+            index=CodeIndex(settings, workspace),
+            llm=build_chat_model(settings),
+            context=_chat_context(run),
+        )
+        with self._lock:
+            # Another request may have built one while this was constructing;
+            # the first to land wins so both sides share a conversation.
+            return self._chats.setdefault(run.id, session)
 
     # -- events -----------------------------------------------------------
 
@@ -246,6 +293,8 @@ class RunManager:
                 dry_run=request.dry_run,
                 commit=request.commit,
                 push=request.push,
+                checkout_branch=request.checkout_branch,
+                restore_branch=request.restore_branch,
                 write_replies=request.reply or request.resolve,
                 resolve_threads=request.resolve,
                 include_review_bodies=request.include_review_bodies,
@@ -311,13 +360,14 @@ class RunManager:
             pr = update.get("pull_request")
             threads = update.get("threads") or []
             run.threads = [_thread_summary(t) for t in threads]
-            emit(
-                {
-                    "type": "pr",
-                    "pr": pr.model_dump() if pr is not None else None,
-                    "threads": run.threads,
-                }
-            )
+            run.pr = pr.model_dump(mode="json") if pr is not None else None
+            emit({"type": "pr", "pr": run.pr, "threads": run.threads})
+
+        elif node == "prepare_branch":
+            switch = update.get("branch_switch")
+            if switch is not None:
+                run.branch = switch.model_dump(mode="json")
+                emit({"type": "branch", "branch": run.branch})
 
         elif node == "index_repo":
             emit({"type": "index", "summary": update.get("index_summary", "")})
@@ -371,6 +421,10 @@ class RunManager:
                 emit({"type": "outcome", "outcome": latest})
 
         elif node == "finalize":
+            switch = update.get("branch_switch")
+            if switch is not None:
+                run.branch = switch.model_dump(mode="json")
+                emit({"type": "branch", "branch": run.branch})
             emit(
                 {
                     "type": "finalize",
@@ -379,6 +433,22 @@ class RunManager:
                     "replies_posted": update.get("replies_posted", 0),
                 }
             )
+
+
+def _chat_context(run: Run) -> str:
+    """Everything the chat needs to know about a run, as prompt text."""
+    pr = run.pr or {}
+    branch = run.branch or {}
+    branch_detail = " ".join(
+        part for part in (branch.get("detail"), branch.get("restore_detail")) if part
+    )
+    return build_run_context(
+        pr_slug=run.request.pr,
+        pr_title=pr.get("title", ""),
+        branch_detail=branch_detail,
+        report=run.report or run.error,
+        outcomes=run.outcomes,
+    )
 
 
 def _thread_summary(thread) -> dict[str, Any]:

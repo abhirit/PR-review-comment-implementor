@@ -18,7 +18,11 @@ pr-agent run "owner/repo#123" --auto-validate     # or drive it from the termina
 
 ## What it actually does
 
-For each review thread on the PR:
+First, once: the checkout is put on the PR's head branch. Anything
+uncommitted is stashed before the switch and handed back at the end, so the
+agent can borrow a checkout you were in the middle of using.
+
+Then, for each review thread on the PR:
 
 1. **Triage** — decides whether the comment asks for a code change, asks a
    question, or needs nothing. Praise and resolved threads are left alone.
@@ -34,30 +38,59 @@ For each review thread on the PR:
    so a broken change never rides along with the good ones.
 
 Then once, at the end: commit, optionally push, optionally reply to each thread
-and resolve the ones it implemented.
+and resolve the ones it implemented — and, if you asked for it, put the
+checkout back on the branch you were on with your stash popped.
 
 ### The graph
 
 ```
-        load_pr ──▶ index_repo ──▶ next_thread
-                                       │
-                   (queue empty) ──────┼──▶ finalize ──▶ END
-                                       │
-                                    triage ──(not actionable)──▶ record
-                                       │
-                                   retrieve ──▶ plan ──▶ implement ──▶ validate
-                                                                          │
-                                                  (failed, attempts left) │
-                                                          ┌── fix ◀───────┤
-                                                          └───────▶ validate
-                                                                          │
-                                                            record ◀──────┘
-                                                               │
-                                                               └──▶ next_thread
+  load_pr ──▶ prepare_branch ──▶ index_repo ──▶ next_thread
+                                                    │
+                              (queue empty) ────────┼──▶ finalize ──▶ END
+                                                    │
+                                                 triage ──(not actionable)──▶ record
+                                                    │
+                                                retrieve ──▶ plan ──▶ implement ──▶ validate
+                                                                                       │
+                                                               (failed, attempts left) │
+                                                                       ┌── fix ◀───────┤
+                                                                       └───────▶ validate
+                                                                                       │
+                                                                         record ◀──────┘
+                                                                            │
+                                                                            └──▶ next_thread
 ```
 
 Threads are processed **one at a time**. Two comments often touch the same
 file, and a queue removes any chance of concurrent edits clobbering each other.
+
+---
+
+## The branch
+
+The agent must edit the code the reviewer was actually looking at, so a run
+begins by checking out the pull request's head branch:
+
+1. If the working tree is dirty, it is stashed first — untracked files
+   included, ignored files left alone.
+2. The branch is checked out. If it is not in the checkout yet it is fetched
+   from `origin`; a pull request opened from a fork is fetched through
+   `pull/<number>/head`, which GitHub publishes on the base repository.
+3. If the branch cannot be reached at all, **the run stops**. Implementing
+   review comments against the wrong branch produces plausible-looking changes
+   to code the reviewer never saw, which is worse than not running.
+
+At the end, `--restore-branch` (the *Go back to your branch afterwards* box in
+the UI, on by default for *Implement and publish*) returns the checkout to the
+branch you started on and pops the stash. The stash entry is found by its
+commit sha rather than by `stash@{0}`, so an entry someone else pushed in the
+meantime is never mistaken for yours.
+
+One exception: if a commit was made but the push failed, the checkout stays on
+the PR branch. The work exists only there, and walking away from it would hide
+that.
+
+Pass `--no-checkout` (or clear the box) to manage the branch yourself.
 
 ---
 
@@ -78,6 +111,12 @@ The UI drives the same graph as the CLI, and shows the run as it happens:
   card showing its triage decision, the plan, the files touched, the validation
   output, a coloured **diff** of what changed, and the reply the agent would
   post. Failed checks and their retries appear as they happen.
+- **Chat** — ask the agent about the run once it has finished: why a comment
+  was skipped, what a diff does, or for another change on top. It has the whole
+  run in context and the same sandboxed file tools, so "also rename that
+  variable" is a request it can carry out. Changes made in chat are written to
+  the checkout but not committed, and there is a toggle to make a message
+  read-only when you only want an answer.
 - **Retrieval** — query the index directly to check whether a comment's subject
   is findable before you run.
 - **History** — replay any earlier run from this server session.
@@ -89,7 +128,8 @@ showing a blank page.
 It is a local tool: it binds to `127.0.0.1`, ships no authentication, and edits
 files and runs your validation commands. Do not expose it to a network you do
 not control. Two runs against one checkout are refused, since they would edit
-the same files.
+the same files, and a run's chat opens only once that run has finished, for the
+same reason.
 
 ---
 
@@ -179,10 +219,11 @@ pr-agent run "owner/repo#123" --repo ./checkout --dry-run
 # The normal run: implement, verify with your checks, commit locally.
 pr-agent run "owner/repo#123" --repo ./checkout --auto-validate
 
-# Full loop: implement, verify, commit, push to the PR branch, reply, resolve.
+# Full loop: implement, verify, commit, push to the PR branch, reply, resolve,
+# then put the checkout back on the branch you were on.
 pr-agent run "owner/repo#123" --repo ./checkout \
     --validate "ruff check ." --validate "pytest -q" \
-    --push --reply --resolve
+    --push --reply --resolve --restore-branch
 
 # One specific comment only.
 pr-agent run "owner/repo#123" --comment-id 1234567890
@@ -192,12 +233,9 @@ pr-agent index --repo ./checkout
 pr-agent search "where are review threads grouped" --repo ./checkout
 ```
 
-Check out the PR branch before running, so the agent edits the code the
-reviewer was looking at:
-
-```bash
-git fetch origin pull/123/head:pr-123 && git checkout pr-123
-```
+The agent checks the PR branch out itself, stashing anything uncommitted
+first, so there is no need to prepare the checkout by hand. If you would rather
+do it yourself, pass `--no-checkout`.
 
 ### Key flags
 
@@ -207,6 +245,8 @@ git fetch origin pull/123/head:pr-123 && git checkout pr-123
 | `--dry-run` | off | Do everything except commit, push and post. |
 | `--no-commit` | commits | Leave changes in the working tree. |
 | `--push` | off | Push the commit to the PR's head branch. |
+| `--checkout` / `--no-checkout` | on | Check the PR branch out first, stashing uncommitted work. |
+| `--restore-branch` | off | Afterwards, return to the original branch and unstash. |
 | `--reply` | off | Post a reply on each thread that was handled. |
 | `--resolve` | off | Also resolve implemented threads (implies `--reply`). |
 | `--validate` | none | A check to run after each change. Repeatable. |
@@ -235,6 +275,8 @@ The design assumes the agent will sometimes be wrong.
   the same run.
 - **Nothing leaves the machine unless you ask.** Committing is local; `--push`,
   `--reply` and `--resolve` are each explicit opt-ins.
+- **Your uncommitted work is never edited over.** It goes to the stash before
+  the branch switch, and comes back by sha, not by position.
 - **Validation is the gate.** With no `--validate` command the agent warns you
   that nothing is being verified. Configure your checks; they are what makes
   the loop trustworthy.
@@ -289,7 +331,8 @@ src/pr_agent/
 ├── tools.py           # the tools the model calls
 ├── prompts.py         # one prompt per stage
 ├── validation.py      # runs your checks
-├── git_ops.py         # commit, push with backoff
+├── chat.py            # the follow-up conversation about a finished run
+├── git_ops.py         # commit, push, branch switching and stashing
 ├── llm.py             # Gemini or Claude, one LangChain interface
 ├── rag/
 │   ├── splitter.py    # language-aware chunking with line metadata
@@ -301,7 +344,7 @@ src/pr_agent/
 │   ├── nodes.py       # one function per node
 │   └── build.py       # wiring and routing
 └── web/
-    ├── app.py         # FastAPI routes, including the SSE event stream
+    ├── app.py         # FastAPI routes: the SSE event stream and the chat
     ├── runner.py      # background runs and live event fan-out
     ├── schemas.py     # request and response bodies
     └── static/        # the UI: one HTML, one CSS, one JS file, no build step
@@ -311,8 +354,8 @@ src/pr_agent/
 
 ## Limitations
 
-- **Forked PRs.** `--push` pushes to the head branch of your local checkout; if
-  the PR comes from a fork you need push rights on that fork.
+- **Forked PRs.** The head branch is fetched through `pull/<number>/head`, so
+  the checkout works, but `--push` still needs push rights on the fork.
 - **Large repositories.** BM25-only indexing is fast, but if you turn
   embeddings on, the first index can take a while. Keep `.pr_agent/index`
   around between runs — only changed files are re-embedded.

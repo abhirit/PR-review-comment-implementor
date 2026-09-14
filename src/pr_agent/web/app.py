@@ -25,7 +25,16 @@ from ..rag.index import CodeIndex
 from ..validation import detect_validation_commands
 from ..workspace import Workspace, WorkspaceError
 from .runner import RunError, RunManager
-from .schemas import ConfigStatus, RunCreated, RunRequest, SearchHit, ThreadSummary
+from .schemas import (
+    ChatHistory,
+    ChatMessage,
+    ChatRequest,
+    ConfigStatus,
+    RunCreated,
+    RunRequest,
+    SearchHit,
+    ThreadSummary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +59,13 @@ def create_app() -> FastAPI:
         resolved = Path(repo_path).expanduser()
         branch: str | None = None
         dirty = False
+        has_stash = False
         is_git = git_ops.is_git_repo(resolved)
         if is_git:
             try:
                 branch = git_ops.current_branch(resolved)
                 dirty = git_ops.is_dirty(resolved)
+                has_stash = git_ops.stash_count(resolved) > 0
             except git_ops.GitError:
                 pass  # detached HEAD or an unreadable index
 
@@ -73,6 +84,7 @@ def create_app() -> FastAPI:
             repo_is_git=is_git,
             repo_branch=branch,
             repo_dirty=dirty,
+            repo_has_stash=has_stash,
             detected_validate_commands=detected,
             version=__version__,
         )
@@ -200,6 +212,59 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # -- follow-up chat ---------------------------------------------------
+
+    def _chattable_run(run_id: str):
+        run = manager.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="No such run")
+        return run
+
+    @app.get("/api/runs/{run_id}/chat", response_model=ChatHistory)
+    def get_chat(run_id: str) -> ChatHistory:
+        run = _chattable_run(run_id)
+        live = run.status in {"starting", "running"}
+        session = manager.peek_chat(run_id)
+        # A run that handed the checkout back is no longer on the PR branch, so
+        # say which branch a further change would land on.
+        branch = None
+        try:
+            checkout = Path(run.request.repo_path).expanduser()
+            if git_ops.is_git_repo(checkout):
+                branch = git_ops.current_branch(checkout)
+        except git_ops.GitError:
+            pass
+        return ChatHistory(
+            run_id=run_id,
+            messages=[ChatMessage(**turn) for turn in (session.history() if session else [])],
+            available=not live,
+            branch=branch,
+            detail=(
+                "The run is still going. Chat opens when it finishes, so the two "
+                "cannot edit the checkout at the same time."
+                if live
+                else ""
+            ),
+        )
+
+    @app.post("/api/runs/{run_id}/chat", response_model=ChatMessage)
+    def post_chat(run_id: str, request: ChatRequest) -> ChatMessage:
+        run = _chattable_run(run_id)
+        # One writer at a time: the run and the chat share a checkout.
+        if run.status in {"starting", "running"}:
+            raise HTTPException(
+                status_code=409,
+                detail="This run is still going. Wait for it to finish before chatting about it.",
+            )
+        try:
+            session = manager.chat_session(run)
+        except Exception as exc:  # noqa: BLE001 - config and model errors alike
+            raise HTTPException(
+                status_code=400, detail=f"{type(exc).__name__}: {exc}"
+            ) from exc
+        turn = session.ask(request.message, allow_edits=request.allow_edits)
+        return ChatMessage(**turn.as_dict())
 
     # -- static UI --------------------------------------------------------
 

@@ -33,6 +33,10 @@ class AgentDeps:
     dry_run: bool = False
     commit: bool = True
     push: bool = False
+    checkout_branch: bool = True
+    """Move the checkout onto the PR's head branch before working."""
+    restore_branch: bool = False
+    """Put the checkout back on the original branch once the run is done."""
     push_branch: str | None = None
     write_replies: bool = False
     resolve_threads: bool = False
@@ -70,23 +74,27 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any | None = None):
     The shape is a queue-driven loop: threads are processed one at a time so
     that edits never race, with an inner validate/fix cycle per thread.
 
-        load_pr -> index_repo -> next_thread
-                                    |
-                    (queue empty) --+--> finalize -> END
-                                    |
-                                 triage --(not actionable)--> record
-                                    |
-                                 retrieve -> plan -> implement -> validate
-                                                                    |
-                                            (fails, attempts left)  +--> fix -+
-                                                                    |         |
-                                                                    +<--------+
-                                                                    |
-                                                                 record -> next_thread
+        load_pr -> prepare_branch -> index_repo -> next_thread
+                                                        |
+                                    (queue empty) ------+--> finalize -> END
+                                                        |
+                                                     triage --(not actionable)--> record
+                                                        |
+                                                     retrieve -> plan -> implement -> validate
+                                                                                         |
+                                                             (fails, attempts left)      |
+                                                                     +--> fix <----------+
+                                                                     |                   |
+                                                                     +--> validate       |
+                                                                                         |
+                                                                         record <--------+
+                                                                            |
+                                                                            +--> next_thread
     """
     graph = StateGraph(AgentState)
 
     graph.add_node("load_pr", nodes.make_load_pr(deps))
+    graph.add_node("prepare_branch", nodes.make_prepare_branch(deps))
     graph.add_node("index_repo", nodes.make_index_repo(deps))
     graph.add_node("next_thread", nodes.make_next_thread(deps))
     graph.add_node("triage", nodes.make_triage(deps))
@@ -99,7 +107,9 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any | None = None):
     graph.add_node("finalize", nodes.make_finalize(deps))
 
     graph.add_edge(START, "load_pr")
-    graph.add_edge("load_pr", "index_repo")
+    graph.add_edge("load_pr", "prepare_branch")
+    # Indexing has to follow the checkout: the branch decides the file contents.
+    graph.add_edge("prepare_branch", "index_repo")
     graph.add_edge("index_repo", "next_thread")
 
     graph.add_conditional_edges(
