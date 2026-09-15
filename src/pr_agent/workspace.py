@@ -229,6 +229,16 @@ class Workspace:
         log.info("rolled back %d file(s)", len(restored))
         return restored
 
+    def pending_paths(self) -> list[str]:
+        """The paths written since :meth:`begin`, without ending the transaction.
+
+        :attr:`touched` accumulates for the lifetime of the workspace, so it
+        cannot tell one transaction's files from an earlier one's. Use this to
+        ask what the current transaction has changed while the snapshots are
+        still needed for a possible :meth:`rollback`.
+        """
+        return sorted(self._snapshots) if self._snapshots else []
+
     def pending_diff(self, context: int = 3) -> str:
         """A unified diff of everything written since :meth:`begin`.
 

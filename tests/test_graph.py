@@ -573,3 +573,35 @@ def test_the_checkout_can_be_turned_off(repo):
 
     assert git_ops.current_branch(repo) == "main"
     assert final.get("branch_switch") is None
+
+def test_a_second_thread_editing_the_same_file_still_records_it(repo):
+    """Regression: `files_changed` must come from the thread's own transaction.
+
+    `Workspace.touched` accumulates for the life of the workspace, so a file an
+    earlier thread already edited would otherwise look unchanged to the later
+    one -- leaving it unstaged, absent from the report, and denied in the reply.
+    """
+    second_edit = GUARD.replace("return a + b", "return a + b  # checked")
+
+    class TwoEditLLM(FakeChatModel):
+        """Writes GUARD for the first thread, a further edit for the ones after."""
+
+        binds = 0
+
+        def bind_tools(self, tools, **kwargs):
+            content = GUARD if self.binds == 0 else second_edit
+            self.binds += 1
+            self.tool_script = implementing_llm(new_content=content).tool_script
+            return super().bind_tools(tools, **kwargs)
+
+    llm = TwoEditLLM(structured=implementing_llm().structured)
+    comments = [comment(cid=1), comment(cid=2, body="Same file, another nit.", line=9)]
+    deps = make_deps(repo, llm, FakeGitHub(comments), commit=False)
+
+    final = run(deps)
+
+    first, second = final["outcomes"]
+    assert first.files_changed == ["src/calc.py"]
+    assert second.files_changed == ["src/calc.py"], "second thread lost its changed file"
+    assert second.implemented
+    assert (repo / "src" / "calc.py").read_text() == second_edit

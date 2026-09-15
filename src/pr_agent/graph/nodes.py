@@ -294,7 +294,6 @@ def make_implement(deps: AgentDeps):
         if state.get("last_error", "").startswith("planning failed"):
             return {"implementation_summary": "", "files_changed": []}
 
-        before = set(deps.workspace.touched)
         task = prompts.implement_task(
             thread.transcript(),
             _location(thread),
@@ -309,7 +308,9 @@ def make_implement(deps: AgentDeps):
         summary, error = run_tool_loop(
             model, tools, messages, deps.settings.max_tool_iterations
         )
-        changed = sorted(deps.workspace.touched - before)
+        # Ask the open transaction, not `touched`: the latter accumulates across
+        # threads, so a file an earlier thread edited would look unchanged here.
+        changed = deps.workspace.pending_paths()
         log.info("implement: %d file(s) changed", len(changed))
         return {
             "implementation_summary": summary,
@@ -326,7 +327,6 @@ def make_fix(deps: AgentDeps):
         model = deps.llm.bind_tools(tools)
         attempts = state.get("attempts", 0) + 1
         log.info("fix attempt %d/%d", attempts, deps.settings.max_fix_attempts)
-        before = set(deps.workspace.touched)
         task = prompts.fix_task(
             state.get("validation_command", ""),
             state.get("validation_output", ""),
@@ -336,7 +336,9 @@ def make_fix(deps: AgentDeps):
         summary, error = run_tool_loop(
             model, tools, messages, deps.settings.max_tool_iterations
         )
-        changed = sorted(set(state.get("files_changed", [])) | (deps.workspace.touched - before))
+        changed = sorted(
+            set(state.get("files_changed", [])) | set(deps.workspace.pending_paths())
+        )
         return {
             "attempts": attempts,
             "implementation_summary": (

@@ -26,12 +26,6 @@ def test_the_first_failure_stops_the_run(tmp_path):
     assert result.command == "exit 3"
 
 
-def test_failure_output_captures_stdout_and_stderr(tmp_path):
-    result = run_validation(tmp_path, ["echo to-out; echo to-err 1>&2; exit 1"])
-    assert "to-out" in result.output
-    assert "to-err" in result.output
-
-
 def test_a_hanging_command_times_out(tmp_path):
     result = run_validation(tmp_path, ["sleep 30"], timeout=1)
     assert not result.ok

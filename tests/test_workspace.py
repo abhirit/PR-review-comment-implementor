@@ -61,6 +61,21 @@ def test_rollback_restores_edits_and_removes_new_files(ws):
     assert "src/calc.py" not in ws.touched
 
 
+def test_pending_paths_reports_only_the_open_transaction(ws):
+    """Each transaction sees its own writes, unlike the cumulative `touched`."""
+    ws.begin()
+    ws.replace("src/calc.py", "return a + b", "return a + b  # first")
+    assert ws.pending_paths() == ["src/calc.py"]
+    assert ws.commit_changes() == ["src/calc.py"]
+    # Outside a transaction there is nothing pending.
+    assert ws.pending_paths() == []
+
+    # A second transaction touching the same file must still report it.
+    ws.begin()
+    ws.replace("src/calc.py", "# first", "# second")
+    assert ws.pending_paths() == ["src/calc.py"]
+    ws.commit_changes()
+
 def test_commit_changes_keeps_edits(ws):
     ws.begin()
     ws.replace("src/calc.py", "return a + b", "return a + b  # noqa")
