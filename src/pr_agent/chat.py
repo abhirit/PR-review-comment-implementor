@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langsmith import traceable
 
 from .config import Settings
 from .models import truncate
@@ -128,6 +129,14 @@ class ChatSession:
             self.turns.append(turn)
             return turn
 
+    # One trace per turn, rather than one per call inside the tool loop, so a
+    # question and the reads it took to answer stay together in LangSmith.
+    # `self` is dropped from the traced inputs: it is the whole session.
+    @traceable(
+        name="chat_turn",
+        run_type="chain",
+        process_inputs=lambda inputs: {k: v for k, v in inputs.items() if k != "self"},
+    )
     def _answer(self, message: str, allow_edits: bool) -> ChatTurn:
         try:
             self._ensure_index()

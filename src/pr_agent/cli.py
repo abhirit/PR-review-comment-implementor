@@ -13,10 +13,11 @@ from rich.logging import RichHandler
 from . import git_ops
 from .config import load_settings
 from .github_client import GitHubClient, GitHubError
-from .graph import build_agent_graph, build_deps
+from .graph import build_agent_graph, build_deps, run_config
 from .graph.state import initial_state
 from .models import PRRef
 from .rag.index import CodeIndex
+from .tracing import configure_tracing, flush_traces, traced_run
 from .validation import detect_validation_commands
 from .workspace import Workspace
 
@@ -98,6 +99,14 @@ def run(
     max_fix_attempts: int = typer.Option(
         None, "--max-fix-attempts", help="How many times to retry after a failed check."
     ),
+    trace: bool = typer.Option(
+        None,
+        "--trace/--no-trace",
+        help="Send the run to LangSmith. On by default when LANGSMITH_API_KEY is set.",
+    ),
+    trace_project: str = typer.Option(
+        None, "--trace-project", help="LangSmith project the run is filed under."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
     """Implement the review comments on a pull request."""
@@ -115,7 +124,16 @@ def run(
         model=model,
         embedding_backend=embeddings,
         max_fix_attempts=max_fix_attempts,
+        langsmith_tracing=trace,
+        langsmith_project=trace_project,
     )
+    tracing = configure_tracing(settings)
+    if tracing:
+        console.print(f"[dim]Tracing to LangSmith project '{settings.langsmith_project}'.[/dim]")
+    elif trace:
+        # Asked for explicitly, so say why it is not happening rather than
+        # running quietly untraced.
+        console.print("[yellow]--trace needs LANGSMITH_API_KEY; running untraced.[/yellow]")
 
     commands = list(validate or [])
     if auto_validate:
@@ -170,23 +188,28 @@ def run(
         raise typer.Exit(code=2) from exc
 
     graph = build_agent_graph(deps)
-    config = {
-        "configurable": {"thread_id": f"{pr_ref.owner}/{pr_ref.repo}#{pr_ref.number}"},
-        # Each review thread costs several super-steps, so the default limit of
-        # 25 is far too low for a PR with more than a couple of comments.
-        "recursion_limit": 500,
-    }
+    config = run_config(deps, thread_id=f"{pr_ref.owner}/{pr_ref.repo}#{pr_ref.number}")
 
     try:
-        final = graph.invoke(initial_state(), config=config)
+        with traced_run(tracing) as trace_link:
+            final = graph.invoke(initial_state(), config=config)
     except git_ops.GitError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
     finally:
         deps.github.close()
+        if tracing:
+            # The tracer uploads in batches from its own thread; this process
+            # is about to exit, so wait for the tail of the trace.
+            flush_traces()
 
     console.print()
     console.print(final.get("report", "(no report)"), markup=False, highlight=False)
+
+    url = trace_link()
+    if url:
+        console.print()
+        console.print(f"[dim]Trace: {url}[/dim]")
 
     failed = [o for o in (final.get("outcomes") or []) if o.error]
     raise typer.Exit(code=1 if failed else 0)
@@ -298,6 +321,14 @@ def serve(
     import os
 
     os.environ.setdefault("PR_AGENT_REPO_PATH", str(repo_path))
+
+    # Each run configures tracing again from its own settings; this is so the
+    # server says up front whether it is on.
+    settings = load_settings(repo_path=repo_path)
+    if configure_tracing(settings):
+        console.print(
+            f"[dim]Tracing to LangSmith project '{settings.langsmith_project}'.[/dim]"
+        )
 
     console.print(f"[green]UI on http://{host}:{port}[/green]")
     uvicorn.run(

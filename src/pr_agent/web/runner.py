@@ -19,11 +19,12 @@ from typing import Any
 from ..chat import ChatSession, build_run_context
 from ..config import load_settings
 from ..github_client import GitHubClient
-from ..graph.build import build_agent_graph, build_deps
+from ..graph.build import build_agent_graph, build_deps, run_config
 from ..graph.state import initial_state
 from ..llm import build_chat_model
 from ..models import PRRef
 from ..rag.index import CodeIndex
+from ..tracing import configure_tracing
 from ..workspace import Workspace
 from .schemas import RunRequest
 
@@ -214,6 +215,7 @@ class RunManager:
             model=run.request.model,
             embedding_backend=run.request.embeddings,
         )
+        configure_tracing(settings)
         workspace = Workspace(
             root=settings.repo_path, max_file_bytes=settings.max_index_file_bytes
         )
@@ -286,6 +288,8 @@ class RunManager:
             )
             if request.validate_commands:
                 settings.validate_commands = request.validate_commands
+            # The log handler above forwards the tracing notice to the UI.
+            configure_tracing(settings)
 
             deps = build_deps(
                 settings,
@@ -304,10 +308,7 @@ class RunManager:
             )
 
             graph = build_agent_graph(deps)
-            config = {
-                "configurable": {"thread_id": run.id},
-                "recursion_limit": 500,
-            }
+            config = run_config(deps, thread_id=run.id)
 
             final: dict[str, Any] = {}
             for chunk in graph.stream(initial_state(), config=config, stream_mode="updates"):

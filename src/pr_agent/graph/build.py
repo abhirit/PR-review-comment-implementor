@@ -68,6 +68,42 @@ def build_deps(
     )
 
 
+def run_config(deps: AgentDeps, thread_id: str) -> dict[str, Any]:
+    """The config the graph is invoked with.
+
+    Besides the checkpointer thread and the recursion limit, this is what makes
+    a run recognisable in LangSmith: the trace is named after the pull request,
+    and carries the model and the switches behind it so two traces of the same
+    PR can be told apart.
+    """
+    pr = deps.pr_ref
+    slug = f"{pr.owner}/{pr.repo}#{pr.number}"
+    return {
+        "configurable": {"thread_id": thread_id},
+        # Each review thread costs several super-steps, so the default limit of
+        # 25 is far too low for a PR with more than a couple of comments.
+        "recursion_limit": 500,
+        "run_name": f"pr-agent {slug}",
+        "tags": [
+            f"repo:{pr.owner}/{pr.repo}",
+            f"provider:{deps.settings.provider}",
+            f"model:{deps.settings.model}",
+            *(["dry-run"] if deps.dry_run else []),
+        ],
+        "metadata": {
+            "pr": slug,
+            "pr_number": pr.number,
+            "provider": deps.settings.provider,
+            "model": deps.settings.model,
+            "embeddings": deps.settings.embedding_backend,
+            "dry_run": deps.dry_run,
+            "commit": deps.commit,
+            "push": deps.push,
+            "validate_commands": deps.settings.validate_commands,
+        },
+    }
+
+
 def build_agent_graph(deps: AgentDeps, checkpointer: Any | None = None):
     """Compile the agent graph.
 

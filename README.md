@@ -257,6 +257,8 @@ do it yourself, pass `--no-checkout`.
 | `--comment-id` | all | Only handle these comment ids. Repeatable. |
 | `--ignore-author` | none | Skip a login's comments. Repeatable. |
 | `--self-login` | none | The agent's own login, so it skips threads it already answered. |
+| `--trace` / `--no-trace` | on with a key | Send the run to LangSmith. |
+| `--trace-project` | `pr-review-implementor` | LangSmith project to file the run under. |
 
 Everything is also settable by environment variable — see `.env.example`.
 
@@ -289,6 +291,43 @@ Review the diff before merging. This is an assistant, not an approver.
 
 ---
 
+## Tracing
+
+Set a [LangSmith](https://smith.langchain.com/settings) key and every run is
+traced — each node, each model call, the tool calls inside the implement and
+fix loops, and the token counts behind them.
+
+```bash
+export LANGSMITH_API_KEY=lsv2_pt_...
+pr-agent run owner/repo#123 --auto-validate
+```
+
+```
+Tracing to LangSmith project 'pr-review-implementor'.
+...
+Trace: https://smith.langchain.com/o/.../r/...
+```
+
+Nothing else is needed: LangChain and LangGraph trace themselves once the key
+is in the environment, so `src/pr_agent/tracing.py` only decides whether it is
+on and hands the settings over.
+
+- **A trace per run.** It is named after the pull request and tagged with the
+  repo, provider and model, so `dry-run` attempts and real ones are told apart
+  at a glance in the project list.
+- **A trace per chat turn.** A follow-up question and the file reads it took to
+  answer stay in one trace rather than scattering across the tool loop.
+- **Off unless you ask.** No key, no tracing — and a `LANGSMITH_TRACING=true`
+  inherited from your shell with no key behind it is cleared rather than left
+  to fail an upload on every model call. `--no-trace` turns it off for one run.
+- **The web UI traces too**, per run, and says so in its log pane.
+
+Traces contain your prompts, the retrieved code chunks and the diffs the model
+produced — the same material the model already sees. Leave the key unset on a
+repository whose contents should not leave the machine.
+
+---
+
 ## Configuration
 
 All settings come from the environment or a `.env` file (see `.env.example`).
@@ -303,6 +342,10 @@ Notable ones:
 | `PR_AGENT_VALIDATE` | empty | `';;'`-separated commands. |
 | `PR_AGENT_RETRIEVAL_K` | `8` | Chunks fed to the planner. |
 | `GITHUB_API_URL` | github.com | Point at GitHub Enterprise here. |
+| `LANGSMITH_API_KEY` | unset | Set it and runs are traced. |
+| `LANGSMITH_TRACING` | `true` | Keep the key but stop sending traces with `false`. |
+| `LANGSMITH_PROJECT` | `pr-review-implementor` | Project the traces are filed under. |
+| `LANGSMITH_ENDPOINT` | US cloud | Your region — `https://eu.` / `https://apac.api.smith.langchain.com` — or a self-hosted LangSmith. |
 
 ---
 
@@ -334,6 +377,7 @@ src/pr_agent/
 ├── chat.py            # the follow-up conversation about a finished run
 ├── git_ops.py         # commit, push, branch switching and stashing
 ├── llm.py             # Gemini or Claude, one LangChain interface
+├── tracing.py         # LangSmith wiring: on, off, and the run's link
 ├── rag/
 │   ├── splitter.py    # language-aware chunking with line metadata
 │   ├── embeddings.py  # google / local / voyage / none

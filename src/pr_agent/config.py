@@ -58,6 +58,32 @@ class Settings(BaseSettings):
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
     voyage_api_key: str | None = Field(default=None, alias="VOYAGE_API_KEY")
 
+    # --- tracing (LangSmith) ---------------------------------------------
+    # Both spellings are accepted: LANGSMITH_* is the current one, LANGCHAIN_*
+    # is what older setups and the LangChain docs still export.
+    langsmith_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
+        serialization_alias="LANGSMITH_API_KEY",
+    )
+    # Tracing follows the key: set one and runs show up in LangSmith. Set this
+    # to false to keep the key configured but stop sending traces.
+    langsmith_tracing: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2"),
+        serialization_alias="LANGSMITH_TRACING",
+    )
+    langsmith_project: str = Field(
+        default="pr-review-implementor",
+        validation_alias=AliasChoices("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"),
+        serialization_alias="LANGSMITH_PROJECT",
+    )
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        validation_alias=AliasChoices("LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT"),
+        serialization_alias="LANGSMITH_ENDPOINT",
+    )
+
     # --- model -----------------------------------------------------------
     provider: Provider = Field(default="google", alias="PR_AGENT_PROVIDER")
     # Left empty, the model id defaults to DEFAULT_MODELS[provider].
@@ -149,6 +175,11 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         return value
+
+    @property
+    def tracing_enabled(self) -> bool:
+        """Whether runs should be traced: asked for, and a key to send them with."""
+        return bool(self.langsmith_tracing and self.langsmith_api_key)
 
     @property
     def llm_api_key(self) -> str | None:
