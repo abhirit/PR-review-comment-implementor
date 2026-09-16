@@ -293,7 +293,6 @@ function buildRunRequest() {
     self_login: $("#self_login").value.trim() || null,
     include_review_bodies: $("#include_review_bodies").checked,
     model: $("#model").value.trim() || null,
-    embeddings: $("#embeddings").value || null,
     validate_commands: validateCommands,
     max_fix_attempts: Number($("#max_fix_attempts").value),
   };

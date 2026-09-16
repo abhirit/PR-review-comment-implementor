@@ -95,7 +95,6 @@ def run_config(deps: AgentDeps, thread_id: str) -> dict[str, Any]:
             "pr_number": pr.number,
             "provider": deps.settings.provider,
             "model": deps.settings.model,
-            "embeddings": deps.settings.embedding_backend,
             "dry_run": deps.dry_run,
             "commit": deps.commit,
             "push": deps.push,

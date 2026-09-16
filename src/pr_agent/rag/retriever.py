@@ -1,23 +1,23 @@
-"""Hybrid retrieval: code-aware BM25 fused with dense vector search.
+"""Code-aware BM25 retrieval.
 
 Keyword search matters a lot for code — a reviewer writing "rename
-`parse_lines`" wants the chunk containing that exact identifier, which dense
-embeddings routinely miss. Dense search in turn catches paraphrases like "this
-should validate the token before use". Fusing both beats either alone.
+`parse_lines`" wants the chunk containing that exact identifier, and the
+tokenizer below makes sure the query matches however the reviewer spelled it.
 """
 
 from __future__ import annotations
 
-import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass
 
 from langchain_core.documents import Document
-from langchain_core.vectorstores import VectorStore
 
-log = logging.getLogger(__name__)
+# Rank smoothing constant. Scores are reported as 1/(RANK_BIAS + rank) rather
+# than raw BM25 magnitudes, so retrieve_many can compare hits from queries of
+# different lengths without the longest query dominating.
+_RANK_BIAS = 60
 
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+")
 _CAMEL_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
@@ -123,51 +123,21 @@ class BM25Index:
         return [(self.documents[idx], score) for idx, score in scores[:k]]
 
 
-class HybridRetriever:
-    """Fuses BM25 and vector hits with reciprocal rank fusion."""
+class CodeRetriever:
+    """Ranks chunks for a query with BM25 over code-aware tokens."""
 
-    def __init__(
-        self,
-        documents: list[Document],
-        vectorstore: VectorStore | None = None,
-        rrf_k: int = 60,
-    ) -> None:
+    def __init__(self, documents: list[Document]) -> None:
         self.documents = documents
-        self.vectorstore = vectorstore
-        self.rrf_k = rrf_k
         self.bm25 = BM25Index(documents)
 
     def retrieve(self, query: str, k: int = 8) -> list[RetrievedChunk]:
-        """Return the top ``k`` chunks for a query, deduplicated by chunk id."""
+        """Return the top ``k`` chunks for a query."""
         if not query.strip():
             return []
 
-        pool = max(k * 3, 15)
-        ranked: dict[str, tuple[Document, float, set[str]]] = {}
-
-        def fuse(hits: list[Document], source: str) -> None:
-            for rank, doc in enumerate(hits):
-                key = _doc_key(doc)
-                contribution = 1.0 / (self.rrf_k + rank + 1)
-                if key in ranked:
-                    doc_ref, score, sources = ranked[key]
-                    sources.add(source)
-                    ranked[key] = (doc_ref, score + contribution, sources)
-                else:
-                    ranked[key] = (doc, contribution, {source})
-
-        fuse([doc for doc, _ in self.bm25.search(query, pool)], "bm25")
-
-        if self.vectorstore is not None:
-            try:
-                fuse(self.vectorstore.similarity_search(query, k=pool), "vector")
-            except Exception as exc:  # noqa: BLE001 - retrieval must not abort a run
-                log.warning("Vector search failed, continuing with BM25 only: %s", exc)
-
-        ordered = sorted(ranked.values(), key=lambda item: item[1], reverse=True)
         return [
-            RetrievedChunk.from_document(doc, score, "+".join(sorted(sources)))
-            for doc, score, sources in ordered[:k]
+            RetrievedChunk.from_document(doc, 1.0 / (_RANK_BIAS + rank + 1), "bm25")
+            for rank, (doc, _) in enumerate(self.bm25.search(query, k))
         ]
 
     def retrieve_many(self, queries: list[str], k: int = 8) -> list[RetrievedChunk]:
@@ -181,13 +151,6 @@ class HybridRetriever:
                     merged[key] = chunk
         ordered = sorted(merged.values(), key=lambda c: c.score, reverse=True)
         return ordered[:k]
-
-
-def _doc_key(doc: Document) -> str:
-    meta = doc.metadata or {}
-    if "id" in meta:
-        return str(meta["id"])
-    return f"{meta.get('path', '?')}:{meta.get('chunk', 0)}"
 
 
 def render_chunks(chunks: list[RetrievedChunk], max_chars: int = 20000) -> str:

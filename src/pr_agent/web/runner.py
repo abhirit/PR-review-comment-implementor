@@ -213,7 +213,6 @@ class RunManager:
         settings = load_settings(
             repo_path=Path(run.request.repo_path),
             model=run.request.model,
-            embedding_backend=run.request.embeddings,
         )
         configure_tracing(settings)
         workspace = Workspace(
@@ -283,7 +282,6 @@ class RunManager:
             settings = load_settings(
                 repo_path=Path(request.repo_path),
                 model=request.model,
-                embedding_backend=request.embeddings,
                 max_fix_attempts=request.max_fix_attempts,
             )
             if request.validate_commands:

@@ -32,7 +32,6 @@ class RunRequest(BaseModel):
     include_review_bodies: bool = False
 
     model: str | None = None
-    embeddings: str | None = None
     validate_commands: list[str] = Field(default_factory=list)
     max_fix_attempts: int | None = None
 
@@ -102,10 +101,8 @@ class ConfigStatus(BaseModel):
 
     llm_key_set: bool
     github_token_set: bool
-    voyage_key_set: bool
     provider: str
     model: str
-    embedding_backend: str
     repo_path: str
     repo_is_git: bool
     repo_branch: str | None = None

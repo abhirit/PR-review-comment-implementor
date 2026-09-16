@@ -12,11 +12,6 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # ANTHROPIC_API_KEY setup keeps working by setting PR_AGENT_PROVIDER=anthropic.
 Provider = str  # one of: "google", "anthropic"
 
-# The chat provider does not decide the embedding backend: Anthropic serves no
-# embeddings endpoint at all, and Gemini's is a separate model and API call, so
-# the backend stays a pluggable choice of its own.
-EmbeddingBackend = str  # one of: "local", "google", "voyage", "none"
-
 DEFAULT_MODELS = {
     # Pro-tier Gemini models are not served on the free API tier, so the
     # default is the newest flash model, which is.
@@ -56,7 +51,6 @@ class Settings(BaseSettings):
     )
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
-    voyage_api_key: str | None = Field(default=None, alias="VOYAGE_API_KEY")
 
     # --- tracing (LangSmith) ---------------------------------------------
     # Both spellings are accepted: LANGSMITH_* is the current one, LANGCHAIN_*
@@ -102,19 +96,9 @@ class Settings(BaseSettings):
     repo_path: Path = Field(default=Path("."), alias="PR_AGENT_REPO_PATH")
 
     # --- retrieval -------------------------------------------------------
-    # BM25 over code-aware tokens already matches the identifiers reviewers
-    # quote, and the model can grep for the rest, so embeddings are opt-in
-    # rather than a required model download on first run.
-    embedding_backend: EmbeddingBackend = Field(default="none", alias="PR_AGENT_EMBEDDINGS")
-    embedding_model: str = Field(
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        alias="PR_AGENT_EMBEDDING_MODEL",
-    )
-    google_embedding_model: str = Field(
-        default="models/gemini-embedding-001", alias="PR_AGENT_GOOGLE_EMBEDDING_MODEL"
-    )
-    voyage_model: str = Field(default="voyage-code-3", alias="PR_AGENT_VOYAGE_MODEL")
-    index_dir: Path = Field(default=Path(".pr_agent/index"), alias="PR_AGENT_INDEX_DIR")
+    # BM25 over code-aware tokens matches the identifiers reviewers quote, and
+    # the model can grep for the rest. The index is in-memory only, so there is
+    # nothing to download, key, or keep in sync on disk.
     chunk_size: int = Field(default=1200, alias="PR_AGENT_CHUNK_SIZE")
     chunk_overlap: int = Field(default=150, alias="PR_AGENT_CHUNK_OVERLAP")
     retrieval_k: int = Field(default=8, alias="PR_AGENT_RETRIEVAL_K")
@@ -169,7 +153,7 @@ class Settings(BaseSettings):
             return [part.strip() for part in value.split(";;") if part.strip()]
         return value
 
-    @field_validator("repo_path", "index_dir", mode="before")
+    @field_validator("repo_path", mode="before")
     @classmethod
     def _expand(cls, value: object) -> object:
         if isinstance(value, str):
@@ -187,12 +171,6 @@ class Settings(BaseSettings):
         if self.provider == "google":
             return self.google_api_key
         return self.anthropic_api_key
-
-    def resolved_index_dir(self) -> Path:
-        """Index directory, resolved relative to the repository when relative."""
-        if self.index_dir.is_absolute():
-            return self.index_dir
-        return (self.repo_path / self.index_dir).resolve()
 
 
 def load_settings(**overrides: object) -> Settings:

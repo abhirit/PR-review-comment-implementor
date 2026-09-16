@@ -36,7 +36,7 @@ def _setup_logging(verbose: bool) -> None:
         handlers=[RichHandler(console=console, rich_tracebacks=True, show_path=verbose)],
     )
     # These are chatty at DEBUG and drown out the agent's own logs.
-    for noisy in ("httpx", "httpcore", "urllib3", "chromadb", "sentence_transformers"):
+    for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -87,9 +87,6 @@ def run(
         None, "--provider", help="Chat provider: google (Gemini) or anthropic (Claude)."
     ),
     model: str = typer.Option(None, "--model", help="Override the model id."),
-    embeddings: str = typer.Option(
-        None, "--embeddings", help="Embedding backend: google, local, voyage or none."
-    ),
     validate: list[str] = typer.Option(
         None, "--validate", help="Validation command to run after each change. Repeatable."
     ),
@@ -122,7 +119,6 @@ def run(
         repo_path=repo_path,
         provider=provider,
         model=model,
-        embedding_backend=embeddings,
         max_fix_attempts=max_fix_attempts,
         langsmith_tracing=trace,
         langsmith_project=trace_project,
@@ -218,14 +214,11 @@ def run(
 @app.command()
 def index(
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Repository to index."),
-    embeddings: str = typer.Option(
-        None, "--embeddings", help="google, local, voyage or none."
-    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Build or refresh the retrieval index without running the agent."""
     _setup_logging(verbose)
-    settings = load_settings(repo_path=repo_path, embedding_backend=embeddings)
+    settings = load_settings(repo_path=repo_path)
     workspace = Workspace(root=settings.repo_path, max_file_bytes=settings.max_index_file_bytes)
     stats = CodeIndex(settings, workspace).refresh()
     console.print(f"[green]{stats.describe()}[/green]")
@@ -236,14 +229,11 @@ def search(
     query: str = typer.Argument(..., help="What to look for."),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r"),
     k: int = typer.Option(5, "--k", help="How many chunks to return."),
-    embeddings: str = typer.Option(
-        None, "--embeddings", help="google, local, voyage or none."
-    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Query the index directly — useful for checking retrieval quality."""
     _setup_logging(verbose)
-    settings = load_settings(repo_path=repo_path, embedding_backend=embeddings)
+    settings = load_settings(repo_path=repo_path)
     workspace = Workspace(root=settings.repo_path, max_file_bytes=settings.max_index_file_bytes)
     code_index = CodeIndex(settings, workspace)
     code_index.refresh()

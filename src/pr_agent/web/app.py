@@ -76,10 +76,8 @@ def create_app() -> FastAPI:
         return ConfigStatus(
             llm_key_set=bool(settings.llm_api_key),
             github_token_set=bool(settings.github_token),
-            voyage_key_set=bool(settings.voyage_api_key),
             provider=settings.provider,
             model=settings.model,
-            embedding_backend=settings.embedding_backend,
             repo_path=str(resolved.resolve()) if resolved.exists() else str(resolved),
             repo_is_git=is_git,
             repo_branch=branch,
@@ -281,12 +279,12 @@ def create_app() -> FastAPI:
 def _index_for(app: FastAPI, settings, workspace: Workspace) -> CodeIndex:
     """Reuse one index per repository path, refreshed on every request.
 
-    The CodeIndex is kept so the vector store and its manifest survive between
+    The CodeIndex is kept so its per-file chunks and hashes survive between
     searches; refresh is still called each time because files change under the
-    server, and re-chunking is cheap while re-embedding is incremental.
+    server, and unchanged files are skipped by hash.
     """
     cache: dict[str, CodeIndex] = getattr(app.state, "index_cache", None) or {}
-    key = f"{workspace.root}|{settings.embedding_backend}|{settings.chunk_size}"
+    key = f"{workspace.root}|{settings.chunk_size}"
     index = cache.get(key)
     if index is None:
         index = CodeIndex(settings, workspace)

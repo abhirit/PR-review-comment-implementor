@@ -13,7 +13,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from .models import truncate
-from .rag.retriever import HybridRetriever
+from .rag.retriever import CodeRetriever
 from .workspace import Workspace, WorkspaceError
 
 log = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class ListDirArgs(BaseModel):
 
 def build_file_tools(
     workspace: Workspace,
-    retriever: HybridRetriever | None = None,
+    retriever: CodeRetriever | None = None,
     allow_edits: bool = True,
 ) -> list[StructuredTool]:
     """Build the tool set the implement node binds to the model.

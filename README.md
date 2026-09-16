@@ -135,24 +135,15 @@ same reason.
 
 ## Retrieval (RAG)
 
-Reviewers write in two registers, so the index serves both:
+Retrieval is **BM25 over code-aware tokens**. `parseHTTPResponse` is indexed
+as `parsehttpresponse`, `parse`, `http`, `response` — so "rename `parse_lines`"
+finds the exact identifier even if the reviewer wrote it in another case.
 
-- **BM25 over code-aware tokens.** `parseHTTPResponse` is indexed as
-  `parsehttpresponse`, `parse`, `http`, `response` — so "rename `parse_lines`"
-  finds the exact identifier even if the reviewer wrote it in another case.
-- **Dense vectors** for paraphrases like *"this should validate the token
-  before using it"*, where no shared keyword exists.
-
-The two result lists are fused with **reciprocal rank fusion**, so a chunk
-found by both ranks above one found by either.
-
-**BM25 alone is the default.** Splitting compound identifiers recovers most of
-the vocabulary overlap embeddings are usually brought in to fix, and whatever
-retrieval misses the model can still reach with `search_repository` and
-`read_file` during the implement step. Set `--embeddings google`,
-`--embeddings local` or `--embeddings voyage` to add the dense half, at the
-cost of a model download or extra API calls plus a vector store to keep in
-sync.
+Splitting compound identifiers this way recovers most of the vocabulary overlap
+embeddings are usually brought in to fix, and whatever retrieval misses the
+model can still reach with `search_repository` and `read_file` during the
+implement step. So there is no dense half: no model download, no extra API key,
+and no vector store to keep in sync.
 
 Other details that matter in practice:
 
@@ -160,10 +151,9 @@ Other details that matter in practice:
   using the splitter for their language, not at arbitrary character offsets.
 - **Line numbers on every chunk**, so a retrieved excerpt is directly
   actionable.
-- **Incremental embedding.** Chunking is redone each run (it is cheap);
-  embedding is not, so only files whose content hash changed are re-embedded.
-  Changing the embedding model or chunk size invalidates the store and forces a
-  clean rebuild.
+- **In-memory, rebuilt per run.** Chunking is cheap enough that nothing is
+  persisted to disk; within a run, files whose content hash is unchanged are
+  skipped when the index is refreshed.
 - **The index follows the agent's own edits.** Each implemented comment
   re-chunks the files it changed, so a later comment is never planned against
   code that has already been replaced.
@@ -181,12 +171,6 @@ cd PR-review-comment-implementor
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# optional: persistent vector store + local embeddings
-pip install -e ".[vector,local-embeddings]"
-
-# optional: Voyage AI embeddings instead (strong on code)
-pip install -e ".[voyage]"
-
 # optional: run on Claude instead of Gemini
 pip install -e ".[anthropic]"
 
@@ -200,10 +184,6 @@ Then copy `.env.example` to `.env` and fill in `GOOGLE_API_KEY`
 > **Running on Claude instead.** Install the `[anthropic]` extra, then set
 > `PR_AGENT_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`. Everything else is
 > unchanged: both providers are driven through the same LangChain interface.
-
-> The embedding backend is configured separately from the chat model —
-> Anthropic serves no embeddings endpoint at all, and Gemini's is a separate
-> model and API call.
 
 ---
 
@@ -253,7 +233,6 @@ do it yourself, pass `--no-checkout`.
 | `--auto-validate` | off | Detect checks from the repo (ruff, pytest, npm, go). |
 | `--max-fix-attempts` | 3 | Retries after a failing check before rolling back. |
 | `--provider` | `google` | `google` (Gemini) or `anthropic` (Claude). |
-| `--embeddings` | `none` | `google`, `local`, `voyage` or `none`. |
 | `--comment-id` | all | Only handle these comment ids. Repeatable. |
 | `--ignore-author` | none | Skip a login's comments. Repeatable. |
 | `--self-login` | none | The agent's own login, so it skips threads it already answered. |
@@ -338,7 +317,6 @@ Notable ones:
 | `PR_AGENT_PROVIDER` | `google` | `google` (Gemini) or `anthropic` (Claude). |
 | `PR_AGENT_MODEL` | per provider | `gemini-3.8-flash` / `claude-opus-5`. Pro-tier Gemini models need a paid API plan. |
 | `PR_AGENT_THINKING` | `true` | The model decides how much to think. Gemini 3 models always think. |
-| `PR_AGENT_EMBEDDINGS` | `none` | `google`, `local`, `voyage`, `none`. |
 | `PR_AGENT_VALIDATE` | empty | `';;'`-separated commands. |
 | `PR_AGENT_RETRIEVAL_K` | `8` | Chunks fed to the planner. |
 | `GITHUB_API_URL` | github.com | Point at GitHub Enterprise here. |
@@ -380,9 +358,8 @@ src/pr_agent/
 ├── tracing.py         # LangSmith wiring: on, off, and the run's link
 ├── rag/
 │   ├── splitter.py    # language-aware chunking with line metadata
-│   ├── embeddings.py  # google / local / voyage / none
-│   ├── index.py       # incremental build + persistence
-│   └── retriever.py   # code-aware BM25 + RRF fusion
+│   ├── index.py       # in-memory build, refreshed as files change
+│   └── retriever.py   # code-aware BM25
 ├── graph/
 │   ├── state.py       # the state passed between nodes
 │   ├── nodes.py       # one function per node
@@ -400,9 +377,9 @@ src/pr_agent/
 
 - **Forked PRs.** The head branch is fetched through `pull/<number>/head`, so
   the checkout works, but `--push` still needs push rights on the fork.
-- **Large repositories.** BM25-only indexing is fast, but if you turn
-  embeddings on, the first index can take a while. Keep `.pr_agent/index`
-  around between runs — only changed files are re-embedded.
+- **Large repositories.** Indexing is fast and in memory, but the whole
+  repository is re-chunked at the start of every run, and the index is held in
+  the process for as long as it lasts.
 - **Outdated comments.** A comment anchored to a line that has since moved is
   still attempted; the agent works from the diff hunk and retrieval, which
   usually recovers, but not always.
